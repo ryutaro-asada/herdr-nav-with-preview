@@ -295,6 +295,11 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     // holds the current input buffer.
     let mut input_buf: Option<String> = None;
 
+    // The pane/tab/workspace the user was on when they opened the navigator.
+    // After a destructive action (close) herdr may re-assign focus within our
+    // home workspace, so we re-assert this focus to keep the user's place.
+    let home = crate::herdr_client::LaunchContext::from_env();
+
     let poller = Poller::spawn(PollRequest {
         generation,
         pane_id: current_pane.clone(),
@@ -393,13 +398,35 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         // Rebuild immediately (non-blocking) and
                                         // defensively drop the just-closed pane in
                                         // case herdr's list hasn't updated yet.
-                                        if let Ok(tree) = build_tree_excluding(api, &pane_id) {
-                                            view.set_tree(tree);
+                                        let fresh = build_tree_excluding(api, &pane_id);
+                                        if let Ok(tree) = &fresh {
+                                            view.set_tree(tree.clone());
                                         }
                                         scroll = 0;
-                                        // Force the poller to retarget to whatever
-                                        // is selected now (the old pane is gone).
                                         current_pane = None;
+                                        // herdr may move focus within our home
+                                        // workspace when a pane closes. Re-assert
+                                        // the user's original pane so their place
+                                        // doesn't jump — but only if that pane
+                                        // still exists and isn't the one we closed.
+                                        if let (Some(hp), Ok(tree)) =
+                                            (home.focused_pane_id.as_deref(), &fresh)
+                                        {
+                                            let still_there = tree
+                                                .workspaces
+                                                .iter()
+                                                .flat_map(|w| &w.tabs)
+                                                .flat_map(|t| &t.panes)
+                                                .any(|p| p.pane_id == hp);
+                                            if hp != pane_id && still_there {
+                                                if let Some(ws) = home.workspace_id.as_deref() {
+                                                    let _ = api.focus_workspace(ws);
+                                                }
+                                                if let Some(tab) = home.tab_id.as_deref() {
+                                                    let _ = api.focus_tab(tab);
+                                                }
+                                            }
+                                        }
                                         // Fully repaint: closing a pane makes herdr
                                         // re-lay-out and can leave our overlay with
                                         // a dirty backbuffer.
