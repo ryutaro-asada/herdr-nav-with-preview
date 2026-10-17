@@ -162,9 +162,18 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         spans.push(Span::styled(caret, base(Style::default().fg(Color::DarkGray))));
     }
 
-    // Agent status dot (keeps its status color, even on the fill).
-    let status = row.agent_status.as_deref();
-    if !matches!(row.kind, RowKind::Workspace { .. }) || status.is_some() {
+    // Kind icon so sessions, tabs, and panes are distinguishable at a glance.
+    let (kind_icon, kind_color) = match row.kind {
+        RowKind::Workspace { .. } => ("◆ ", Color::Cyan),
+        RowKind::Tab { .. } => ("▪ ", Color::Gray),
+        RowKind::Pane { .. } => ("› ", Color::DarkGray),
+    };
+    spans.push(Span::styled(kind_icon, base(Style::default().fg(kind_color))));
+
+    // Agent status dot: only on pane rows, so the session/tab rows stay clean
+    // and the running state reads at the pane level.
+    if matches!(row.kind, RowKind::Pane { .. }) {
+        let status = row.agent_status.as_deref();
         spans.push(Span::styled(
             format!("{} ", status_glyph(status)),
             base(Style::default().fg(status_color(status))),
