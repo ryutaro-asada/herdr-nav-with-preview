@@ -73,6 +73,14 @@ pub enum LoopOutcome {
     Jumped,
 }
 
+/// What the active name-entry prompt will create when confirmed.
+enum InputTarget {
+    /// Create a new workspace with the entered label in this cwd.
+    Workspace { cwd: Option<String> },
+    /// Create a new tab in this workspace.
+    Tab { workspace_id: String },
+}
+
 /// Resolve the pane id to preview for the currently selected row.
 fn selected_pane_id(view: &TreeView) -> Option<String> {
     let row = view.selected_row()?;
@@ -302,12 +310,10 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     // The tab the overlay itself lives in. Closing panes in this tab would
     // take the navigator down with it, so we refuse to close them.
     let own_tab = crate::herdr_client::own_tab_id();
-    // When `Some`, we're in the "new workspace name" text-entry mode and this
-    // holds the current input buffer.
+    // When `Some`, we're in the name-entry mode and this holds the input buffer.
     let mut input_buf: Option<String> = None;
-    // The cwd to create the new workspace in (project dir), captured when the
-    // prompt opens so the new workspace inherits the right project.
-    let mut input_cwd: Option<String> = None;
+    // What the current prompt will create (workspace or tab).
+    let mut input_target: Option<InputTarget> = None;
 
     // The pane/tab/workspace the user was on when they opened the navigator.
     // After a destructive action (close) herdr may re-assign focus within our
@@ -332,9 +338,13 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             let title = preview_title(&rows, selected);
             // In text-entry mode, show the prompt (with a cursor) in the bar;
             // otherwise show the current status/help.
-            let bar_text = input_buf
-                .as_ref()
-                .map(|b| format!("new workspace name: {b}\u{2588}"));
+            let bar_text = input_buf.as_ref().map(|b| {
+                let what = match input_target {
+                    Some(InputTarget::Tab { .. }) => "new tab name",
+                    _ => "new workspace name",
+                };
+                format!("{what}: {b}\u{2588}")
+            });
             let bar = bar_text.as_deref().or(status.as_deref());
             let mut scroll_ref = scroll;
             guard.terminal().draw(|frame| {
@@ -357,40 +367,66 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                 if key.kind == KeyEventKind::Press {
                     dirty = true;
 
-                    // Text-entry mode for naming a new workspace takes priority.
+                    // Name-entry mode (for new tab or workspace) takes priority.
                     if let Some(buf) = input_buf.as_mut() {
                         match key.code {
                             KeyCode::Enter => {
                                 let label = buf.trim().to_string();
-                                let label = if label.is_empty() {
-                                    // Fall back to the project name or next
-                                    // workspace number if the field was cleared.
-                                    view.tree().next_workspace_number().to_string()
-                                } else {
-                                    label
-                                };
-                                match api.create_workspace(&label, input_cwd.as_deref()) {
-                                    Ok(new_id) => {
-                                        status = Some(format!("created workspace {label}"));
-                                        if let Ok(tree) = build_tree(api) {
-                                            view.set_tree(tree);
+                                match input_target.take() {
+                                    Some(InputTarget::Workspace { cwd }) => {
+                                        let label = if label.is_empty() {
+                                            view.tree().next_workspace_number().to_string()
+                                        } else {
+                                            label
+                                        };
+                                        match api.create_workspace(&label, cwd.as_deref()) {
+                                            Ok(new_id) => {
+                                                status =
+                                                    Some(format!("created workspace {label}"));
+                                                if let Ok(tree) = build_tree(api) {
+                                                    view.set_tree(tree);
+                                                }
+                                                view.select_for_launch(Some(&new_id), None, None);
+                                                scroll = 0;
+                                                current_pane = None;
+                                            }
+                                            Err(e) => {
+                                                status = Some(format!("create failed: {e}"));
+                                            }
                                         }
-                                        // Move selection to the new workspace.
-                                        view.select_for_launch(Some(&new_id), None, None);
-                                        scroll = 0;
-                                        current_pane = None;
                                     }
-                                    Err(e) => {
-                                        status = Some(format!("create failed: {e}"));
+                                    Some(InputTarget::Tab { workspace_id }) => {
+                                        // herdr names tabs by number; the entered
+                                        // label is only applied when non-empty.
+                                        match api.create_tab(&workspace_id) {
+                                            Ok(new_tab) => {
+                                                if !label.is_empty() {
+                                                    let _ = api.rename_tab(&new_tab, &label);
+                                                }
+                                                status = Some("added tab".to_string());
+                                                if let Ok(tree) = build_tree(api) {
+                                                    view.set_tree(tree);
+                                                }
+                                                view.select_for_launch(
+                                                    Some(&workspace_id),
+                                                    Some(&new_tab),
+                                                    None,
+                                                );
+                                                current_pane = None;
+                                            }
+                                            Err(e) => {
+                                                status = Some(format!("add tab failed: {e}"));
+                                            }
+                                        }
                                     }
+                                    None => {}
                                 }
                                 input_buf = None;
-                                input_cwd = None;
                             }
                             KeyCode::Esc => {
                                 status = None;
                                 input_buf = None;
-                                input_cwd = None;
+                                input_target = None;
                             }
                             KeyCode::Backspace => {
                                 buf.pop();
@@ -460,47 +496,36 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
                             KeyCode::Char('n') => {
-                                // Add a tab to the selected workspace.
+                                // Open a prompt to add a tab to the selected
+                                // workspace. Default name is the next tab number.
                                 let ws = view.selected_row().map(|r| match r.kind {
                                     RowKind::Workspace { workspace_id } => workspace_id,
                                     RowKind::Tab { workspace_id, .. } => workspace_id,
                                     RowKind::Pane { workspace_id, .. } => workspace_id,
                                 });
                                 match ws {
-                                    Some(wid) => match api.create_tab(&wid) {
-                                        Ok(new_tab) => {
-                                            status = Some("added tab".to_string());
-                                            if let Ok(tree) = build_tree(api) {
-                                                view.set_tree(tree);
-                                            }
-                                            // Move selection onto the new tab's
-                                            // pane so the cursor follows the tab
-                                            // we just added (and Enter would jump
-                                            // there, not to some unrelated pane).
-                                            view.select_for_launch(Some(&wid), Some(&new_tab), None);
-                                            current_pane = None;
-                                            // No full clear() here: adding a tab
-                                            // doesn't disturb our popup, and a
-                                            // clear causes a visible blank flash
-                                            // that looks like the nav closed.
-                                        }
-                                        Err(e) => status = Some(format!("add tab failed: {e}")),
-                                    },
+                                    Some(wid) => {
+                                        let default =
+                                            view.tree().next_tab_number(&wid).to_string();
+                                        status = None;
+                                        input_target =
+                                            Some(InputTarget::Tab { workspace_id: wid });
+                                        input_buf = Some(default);
+                                    }
                                     None => {
-                                        status = Some("select a workspace to add a tab".to_string());
+                                        status =
+                                            Some("select a workspace to add a tab".to_string());
                                     }
                                 }
                             }
                             KeyCode::Char('N') => {
-                                // Add a workspace: open the name prompt, defaulting
-                                // to the selected project's directory name (like
-                                // herdr's native auto-naming), and remember its cwd.
-                                let cwd = view
-                                    .selected_row()
-                                    .and_then(|r| {
-                                        r.representative_pane(view.tree())
-                                            .and_then(|p| p.cwd.clone())
-                                    });
+                                // Open a prompt to add a workspace. Default name is
+                                // the selected project's directory name (like
+                                // herdr's native auto-naming); remember its cwd.
+                                let cwd = view.selected_row().and_then(|r| {
+                                    r.representative_pane(view.tree())
+                                        .and_then(|p| p.cwd.clone())
+                                });
                                 let default = cwd
                                     .as_deref()
                                     .map(project_name)
@@ -509,7 +534,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         view.tree().next_workspace_number().to_string()
                                     });
                                 status = None;
-                                input_cwd = cwd;
+                                input_target = Some(InputTarget::Workspace { cwd });
                                 input_buf = Some(default);
                             }
                             KeyCode::Enter => {

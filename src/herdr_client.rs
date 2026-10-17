@@ -321,6 +321,8 @@ pub trait HerdrApi {
     fn create_workspace(&self, label: &str, cwd: Option<&str>) -> Result<String>;
     /// Create a new tab in the given workspace, returning the new tab id.
     fn create_tab(&self, workspace_id: &str) -> Result<String>;
+    /// Rename a tab.
+    fn rename_tab(&self, tab_id: &str, label: &str) -> Result<()>;
 
     /// Execute a focus plan. The workspace and tab steps are required (an error
     /// propagates); the pane step is best-effort and its error is swallowed.
@@ -430,6 +432,10 @@ impl HerdrApi for CliHerdr {
     fn create_tab(&self, workspace_id: &str) -> Result<String> {
         let out = self.run(&["tab", "create", "--workspace", workspace_id, "--no-focus"])?;
         parse_created_tab_id(&out)
+    }
+
+    fn rename_tab(&self, tab_id: &str, label: &str) -> Result<()> {
+        self.run(&["tab", "rename", tab_id, label]).map(|_| ())
     }
 }
 
@@ -569,6 +575,12 @@ mod tests {
         fn create_tab(&self, workspace_id: &str) -> Result<String> {
             self.calls.borrow_mut().push(format!("tab:{workspace_id}"));
             Ok(format!("{workspace_id}:tN"))
+        }
+        fn rename_tab(&self, tab_id: &str, label: &str) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("renametab:{tab_id}:{label}"));
+            Ok(())
         }
     }
 
