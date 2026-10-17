@@ -261,6 +261,7 @@ impl FocusPlan {
         }
     }
 
+    #[allow(dead_code)]
     pub fn pane(
         workspace_id: impl Into<String>,
         tab_id: impl Into<String>,

@@ -77,29 +77,53 @@ impl Row {
     }
 
     /// Build the focus plan for jumping to this row. For a workspace or tab we
-    /// also target their representative pane so the jump lands as precisely as
-    /// the backend allows.
+    /// also target their representative pane. The pane-level step uses
+    /// `agent focus`, which only works when an agent is present, so we only set
+    /// `pane_id` for panes that actually host an agent; plain shells rely on
+    /// workspace + tab focus (which already brings the pane forward).
     pub fn focus_plan(&self, tree: &Tree) -> crate::herdr_client::FocusPlan {
         use crate::herdr_client::FocusPlan;
+
+        // Pane-id for the agent-focus step, but only if that pane has an agent.
+        let agent_pane = |p: &crate::tree::PaneNode| -> Option<String> {
+            if p.agent.as_deref().map(|a| !a.is_empty()).unwrap_or(false) {
+                Some(p.pane_id.clone())
+            } else {
+                None
+            }
+        };
+
         match &self.kind {
             RowKind::Pane {
                 workspace_id,
                 tab_id,
                 pane_id,
-            } => FocusPlan::pane(workspace_id, tab_id, pane_id),
+            } => {
+                let mut plan = FocusPlan::tab(workspace_id, tab_id);
+                // Only add the agent-focus step when this pane hosts an agent.
+                let has_agent = tree
+                    .workspaces
+                    .iter()
+                    .flat_map(|w| &w.tabs)
+                    .flat_map(|t| &t.panes)
+                    .find(|p| &p.pane_id == pane_id)
+                    .and_then(agent_pane);
+                plan.pane_id = has_agent;
+                plan
+            }
             RowKind::Tab {
                 workspace_id,
                 tab_id,
             } => {
                 let mut plan = FocusPlan::tab(workspace_id, tab_id);
-                plan.pane_id = self.representative_pane(tree).map(|p| p.pane_id.clone());
+                plan.pane_id = self.representative_pane(tree).and_then(agent_pane);
                 plan
             }
             RowKind::Workspace { workspace_id } => {
                 let mut plan = FocusPlan::workspace(workspace_id);
                 if let Some(p) = self.representative_pane(tree) {
                     plan.tab_id = Some(p.tab_id.clone());
-                    plan.pane_id = Some(p.pane_id.clone());
+                    plan.pane_id = agent_pane(p);
                 }
                 plan
             }
@@ -603,23 +627,33 @@ mod tests {
         let view = TreeView::new(sample_tree());
         let rows = view.rows();
         let tree = view.tree();
-        // Workspace row -> workspace + its first tab/pane.
+        // In sample_tree, w1:p1 has NO agent and w1:p2 has agent "claude".
+        // The pane-level (agent focus) step is only set for panes with an agent.
+
+        // Workspace row -> workspace + first tab; pane step omitted (w1:p1 has
+        // no agent).
         let wp = rows[0].focus_plan(tree);
         assert_eq!(wp.workspace_id.as_deref(), Some("w1"));
         assert_eq!(wp.tab_id.as_deref(), Some("w1:t1"));
-        assert_eq!(wp.pane_id.as_deref(), Some("w1:p1"));
+        assert_eq!(wp.pane_id, None);
 
-        // Tab row (index 3 is w1:t2) -> workspace + tab + its pane.
+        // Tab row (index 3 is w1:t2) -> its pane w1:p2 has an agent, so the
+        // agent-focus step is included.
         let tp = rows[3].focus_plan(tree);
         assert_eq!(tp.workspace_id.as_deref(), Some("w1"));
         assert_eq!(tp.tab_id.as_deref(), Some("w1:t2"));
         assert_eq!(tp.pane_id.as_deref(), Some("w1:p2"));
 
-        // Pane row (index 2 is w1:p1) -> full triple.
+        // Pane row (index 2 is w1:p1, no agent) -> workspace + tab only.
         let pp = rows[2].focus_plan(tree);
         assert_eq!(pp.workspace_id.as_deref(), Some("w1"));
         assert_eq!(pp.tab_id.as_deref(), Some("w1:t1"));
-        assert_eq!(pp.pane_id.as_deref(), Some("w1:p1"));
+        assert_eq!(pp.pane_id, None);
+
+        // Pane row (index 4 is w1:p2, has agent) -> includes agent-focus step.
+        let pp2 = rows[4].focus_plan(tree);
+        assert_eq!(pp2.tab_id.as_deref(), Some("w1:t2"));
+        assert_eq!(pp2.pane_id.as_deref(), Some("w1:p2"));
     }
 
     #[test]
