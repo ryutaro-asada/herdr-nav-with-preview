@@ -103,7 +103,7 @@ fn tab_key(id: &str) -> String {
 
 /// Compute the first visible row index so that `selected` stays within a
 /// window of `height` rows out of `total`. Pure and unit-tested.
-fn scroll_offset(selected: usize, total: usize, height: usize) -> usize {
+pub fn scroll_offset(selected: usize, total: usize, height: usize) -> usize {
     if height == 0 || total <= height {
         return 0;
     }
@@ -231,13 +231,6 @@ impl TreeView {
         if self.selected > 0 {
             self.selected -= 1;
         }
-    }
-
-    /// First row index to render so the selected row stays visible within a
-    /// viewport of `height` rows. Keeps the selection on screen when the tree
-    /// is taller than the pane.
-    pub fn scroll_offset(&self, height: usize) -> usize {
-        scroll_offset(self.selected, self.rows().len(), height)
     }
 
     fn selected_key(&self) -> Option<String> {

@@ -118,6 +118,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     let mut current_pane = selected_pane_id(view);
     let generation = poll_state.generation();
     let mut preview = String::new();
+    // Cache the ANSI-parsed preview so we only parse when the text changes.
+    let mut preview_text: Text<'static> = Text::default();
     let mut status: Option<String> = None;
 
     let poller = Poller::spawn(PollRequest {
@@ -125,14 +127,25 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
         pane_id: current_pane.clone(),
     });
 
+    // Only redraw when something actually changed. This keeps key handling
+    // snappy and avoids re-flattening the tree / re-parsing ANSI every tick.
+    let mut dirty = true;
+
     loop {
-        guard
-            .terminal()
-            .draw(|frame| draw(frame, view, &preview, status.as_deref()))?;
+        if dirty {
+            let rows = view.rows();
+            let selected = view.selected_index();
+            let title = preview_title(&rows, selected);
+            guard.terminal().draw(|frame| {
+                draw(frame, &rows, selected, &preview_text, &title, status.as_deref())
+            })?;
+            dirty = false;
+        }
 
         if event::poll(EVENT_POLL)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
+                    dirty = true;
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
                         KeyCode::Enter => {
@@ -151,7 +164,9 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                         KeyCode::Right | KeyCode::Char('l') => view.expand(),
                         KeyCode::Left | KeyCode::Char('h') => view.collapse(),
                         KeyCode::Char(' ') => view.toggle(),
-                        _ => {}
+                        _ => {
+                            dirty = false;
+                        }
                     }
                 }
             }
@@ -163,6 +178,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
         if new_pane != current_pane {
             let gen = poll_state.bump();
             preview.clear();
+            preview_text = Text::default();
+            dirty = true;
             poller.set_request(PollRequest {
                 generation: gen,
                 pane_id: new_pane.clone(),
@@ -170,19 +187,46 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             current_pane = new_pane;
         }
 
-        // Drain any pending updates; apply only the current generation.
+        // Drain any pending updates; apply only the current generation. Parse
+        // ANSI once here (not every frame) and mark the frame dirty.
         while let Ok(update) = poller.updates.try_recv() {
-            if poll_state.accepts(update.generation) && Some(&update.pane_id) == current_pane.as_ref()
+            if poll_state.accepts(update.generation)
+                && Some(&update.pane_id) == current_pane.as_ref()
+                && update.text != preview
             {
                 preview = update.text;
+                preview_text = preview
+                    .as_bytes()
+                    .into_text()
+                    .unwrap_or_else(|_| Text::from(preview.clone()));
+                dirty = true;
             }
         }
     }
 }
 
+/// Title for the preview block based on the selected row.
+fn preview_title(rows: &[crate::view::Row], selected: usize) -> String {
+    match rows.get(selected).map(|r| &r.kind) {
+        Some(RowKind::Pane { pane_id, .. }) => format!(" preview: {pane_id} "),
+        Some(RowKind::Tab { tab_id, .. }) => format!(" preview: {tab_id} "),
+        Some(RowKind::Workspace { workspace_id }) => format!(" preview: {workspace_id} "),
+        None => " preview ".to_string(),
+    }
+}
+
 /// Draw the two-pane layout: tree on the left, preview on the right, plus a
-/// help/status bar at the bottom.
-pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str, status: Option<&str>) {
+/// help/status bar at the bottom. `rows` is precomputed by the caller so the
+/// tree is only flattened once per frame, and `preview_text` is the already
+/// ANSI-parsed preview so parsing is not repeated every frame.
+pub fn draw(
+    frame: &mut ratatui::Frame,
+    rows: &[crate::view::Row],
+    selected: usize,
+    preview_text: &Text<'static>,
+    preview_title: &str,
+    status: Option<&str>,
+) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -193,13 +237,10 @@ pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str, status: 
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(outer[0]);
 
-    let rows = view.rows();
-    let selected = view.selected_index();
-
     // Vertical scroll: keep the selected row visible when the tree is taller
     // than the pane. Inner height excludes the top/bottom border rows.
     let tree_inner_height = chunks[0].height.saturating_sub(2) as usize;
-    let offset = view.scroll_offset(tree_inner_height);
+    let offset = crate::view::scroll_offset(selected, rows.len(), tree_inner_height);
     // Inner width excludes the left/right borders; used to trim long labels.
     let tree_inner_width = chunks[0].width.saturating_sub(2) as usize;
 
@@ -241,32 +282,11 @@ pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str, status: 
     );
     frame.render_widget(tree_widget, chunks[0]);
 
-    let title = view
-        .selected_row()
-        .map(|r| match r.kind {
-            RowKind::Pane { pane_id, .. } => format!(" preview: {pane_id} "),
-            RowKind::Tab { tab_id, .. } => format!(" preview: {tab_id} "),
-            RowKind::Workspace { workspace_id } => format!(" preview: {workspace_id} "),
-        })
-        .unwrap_or_else(|| " preview ".to_string());
-
-    // Clip to the inner height so long output doesn't overflow the block.
-    let inner_height = chunks[1].height.saturating_sub(2) as usize;
-    let clipped: String = preview
-        .lines()
-        .take(inner_height.max(1))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // Render the preview with its original ANSI colors. Fall back to plain text
-    // if the bytes can't be parsed as ANSI.
-    let preview_text: Text = clipped
-        .as_bytes()
-        .into_text()
-        .unwrap_or_else(|_| Text::from(clipped.clone()));
-
-    let preview_widget = Paragraph::new(preview_text)
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let preview_widget = Paragraph::new(preview_text.clone()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(preview_title.to_string()),
+    );
     frame.render_widget(preview_widget, chunks[1]);
 
     // Bottom help/status bar.
