@@ -562,29 +562,34 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                             KeyCode::Left | KeyCode::Char('h') => view.collapse(),
                             KeyCode::Char(' ') => view.toggle(),
                             KeyCode::Char('x') => {
-                                // Arm a tmux-style yes/no confirmation.
-                                match view.selected_row().map(|r| r.kind) {
-                                    Some(RowKind::Pane { pane_id, tab_id, .. }) => {
-                                        if own_tab.as_deref() == Some(tab_id.as_str()) {
-                                            // Closing a pane in the overlay's own
-                                            // tab would kill the navigator itself.
+                                // Arm a close confirmation for the selected row's
+                                // representative pane. Works on pane, tab, and
+                                // workspace rows (each resolves to a pane), so a
+                                // following Enter confirms the close instead of
+                                // falling through to the jump action.
+                                let target = view.selected_row().and_then(|r| {
+                                    r.representative_pane(view.tree()).map(|p| {
+                                        (p.pane_id.clone(), p.tab_id.clone(), r.name.clone())
+                                    })
+                                });
+                                match target {
+                                    Some((pid, tid, name)) => {
+                                        if own_tab.as_deref() == Some(tid.as_str()) {
+                                            // This pane lives in the navigator's own
+                                            // tab; closing it could disturb nav.
                                             status = Some(
                                                 "can't close a pane in the navigator's own tab"
                                                     .to_string(),
                                             );
                                         } else {
-                                            let name = view
-                                                .selected_row()
-                                                .map(|r| r.name)
-                                                .unwrap_or_else(|| pane_id.clone());
-                                            confirm_close = Some(pane_id);
+                                            confirm_close = Some(pid);
                                             status = Some(format!(
                                                 "kill pane \"{name}\"?  Enter = yes   Esc = no"
                                             ));
                                         }
                                     }
-                                    _ => {
-                                        status = Some("select a pane to close".to_string());
+                                    None => {
+                                        status = Some("nothing to close".to_string());
                                     }
                                 }
                             }
