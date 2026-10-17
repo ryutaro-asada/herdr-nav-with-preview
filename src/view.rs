@@ -156,9 +156,11 @@ impl TreeView {
         &self.tree
     }
 
-    /// Move the initial selection to the row that best matches the launch
-    /// context: the focused pane if present, else the tab, else the workspace.
-    /// Falls back to leaving selection at 0 when nothing matches.
+    /// Move the initial selection to the pane the user was on when they opened
+    /// the navigator. Always lands on a *pane* row: the exact focused pane, or
+    /// failing that the first pane under the given tab, or the first pane under
+    /// the given workspace. Only if no pane can be resolved does it fall back
+    /// to the matching tab or workspace row.
     pub fn select_for_launch(
         &mut self,
         workspace_id: Option<&str>,
@@ -166,7 +168,8 @@ impl TreeView {
         pane_id: Option<&str>,
     ) {
         let rows = self.rows();
-        // Priority 1: exact pane row.
+
+        // 1: exact pane row.
         if let Some(pid) = pane_id {
             if let Some(i) = rows.iter().position(|r| {
                 matches!(&r.kind, RowKind::Pane { pane_id, .. } if pane_id == pid)
@@ -175,7 +178,25 @@ impl TreeView {
                 return;
             }
         }
-        // Priority 2: tab row.
+        // 2: first pane under the given tab.
+        if let Some(tid) = tab_id {
+            if let Some(i) = rows.iter().position(|r| {
+                matches!(&r.kind, RowKind::Pane { tab_id, .. } if tab_id == tid)
+            }) {
+                self.selected = i;
+                return;
+            }
+        }
+        // 3: first pane under the given workspace.
+        if let Some(wid) = workspace_id {
+            if let Some(i) = rows.iter().position(|r| {
+                matches!(&r.kind, RowKind::Pane { workspace_id, .. } if workspace_id == wid)
+            }) {
+                self.selected = i;
+                return;
+            }
+        }
+        // 4: no pane resolved — fall back to the tab, then the workspace row.
         if let Some(tid) = tab_id {
             if let Some(i) = rows.iter().position(|r| {
                 matches!(&r.kind, RowKind::Tab { tab_id, .. } if tab_id == tid)
@@ -184,7 +205,6 @@ impl TreeView {
                 return;
             }
         }
-        // Priority 3: workspace row.
         if let Some(wid) = workspace_id {
             if let Some(i) = rows.iter().position(|r| {
                 matches!(&r.kind, RowKind::Workspace { workspace_id } if workspace_id == wid)
@@ -588,20 +608,22 @@ mod tests {
         // Rows: 0=w1, 1=w1:t1, 2=w1:p1, 3=w1:t2, 4=w1:p2
         let mut v = TreeView::new(sample_tree());
         v.select_for_launch(Some("w1"), Some("w1:t2"), Some("w1:p2"));
-        assert_eq!(v.selected_index(), 4); // pane wins
+        assert_eq!(v.selected_index(), 4); // exact pane
 
+        // No exact pane: land on the first pane under the given tab.
         let mut v = TreeView::new(sample_tree());
         v.select_for_launch(Some("w1"), Some("w1:t2"), None);
-        assert_eq!(v.selected_index(), 3); // tab
+        assert_eq!(v.selected_index(), 4); // w1:t2's pane (w1:p2)
 
+        // No tab: land on the first pane under the workspace.
         let mut v = TreeView::new(sample_tree());
         v.select_for_launch(Some("w1"), None, None);
-        assert_eq!(v.selected_index(), 0); // workspace
+        assert_eq!(v.selected_index(), 2); // first pane w1:p1
 
-        // Unknown ids leave selection at 0.
+        // Unknown ids leave selection unchanged.
         let mut v = TreeView::new(sample_tree());
         v.move_down();
         v.select_for_launch(Some("zzz"), Some("zzz"), Some("zzz"));
-        assert_eq!(v.selected_index(), 1); // unchanged
+        assert_eq!(v.selected_index(), 1);
     }
 }
