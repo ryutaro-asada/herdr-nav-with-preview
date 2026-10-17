@@ -461,27 +461,26 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
                             KeyCode::Char('n') => {
-                                // Add a pane: split the selected pane downward.
-                                let target = view
-                                    .selected_row()
-                                    .and_then(|r| {
-                                        r.representative_pane(view.tree())
-                                            .map(|p| p.pane_id.clone())
-                                    });
-                                match target {
-                                    Some(pid) => match api.split_pane(&pid) {
-                                        Ok(_new) => {
-                                            status = Some("added pane".to_string());
+                                // Add a tab to the selected workspace.
+                                let ws = view.selected_row().map(|r| match r.kind {
+                                    RowKind::Workspace { workspace_id } => workspace_id,
+                                    RowKind::Tab { workspace_id, .. } => workspace_id,
+                                    RowKind::Pane { workspace_id, .. } => workspace_id,
+                                });
+                                match ws {
+                                    Some(wid) => match api.create_tab(&wid) {
+                                        Ok(_new_tab) => {
+                                            status = Some("added tab".to_string());
                                             if let Ok(tree) = build_tree(api) {
                                                 view.set_tree(tree);
                                             }
                                             current_pane = None;
                                             guard.terminal().clear().ok();
                                         }
-                                        Err(e) => status = Some(format!("add pane failed: {e}")),
+                                        Err(e) => status = Some(format!("add tab failed: {e}")),
                                     },
                                     None => {
-                                        status = Some("select a pane to split".to_string());
+                                        status = Some("select a workspace to add a tab".to_string());
                                     }
                                 }
                             }
@@ -676,7 +675,7 @@ pub fn draw(
                 .add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
-            " ↑/↓ move   ←/→ fold   ⏎ jump   n pane   N space   x close   q quit ",
+            " ↑/↓ move   ←/→ fold   ⏎ jump   n tab   N space   x close   q quit ",
             Style::default().fg(Color::DarkGray),
         )),
     };

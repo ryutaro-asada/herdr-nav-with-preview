@@ -234,25 +234,25 @@ pub fn parse_created_workspace_id(json: &str) -> Result<String> {
 }
 
 #[derive(Debug, Deserialize)]
-struct SplitPane {
-    pane_id: String,
+struct CreatedTab {
+    tab_id: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct SplitPaneResult {
-    pane: SplitPane,
+struct CreateTabResult {
+    tab: CreatedTab,
 }
 
 #[derive(Debug, Deserialize)]
-struct SplitPaneEnvelope {
-    result: SplitPaneResult,
+struct CreateTabEnvelope {
+    result: CreateTabResult,
 }
 
-/// Parse the new pane id from `pane split` output (`.result.pane.pane_id`).
-pub fn parse_split_pane_id(json: &str) -> Result<String> {
-    let env: SplitPaneEnvelope =
-        serde_json::from_str(json).context("failed to parse `pane split` JSON")?;
-    Ok(env.result.pane.pane_id)
+/// Parse the new tab id from `tab create` output (`.result.tab.tab_id`).
+pub fn parse_created_tab_id(json: &str) -> Result<String> {
+    let env: CreateTabEnvelope =
+        serde_json::from_str(json).context("failed to parse `tab create` JSON")?;
+    Ok(env.result.tab.tab_id)
 }
 
 // --- CLI invocation ---
@@ -319,8 +319,8 @@ pub trait HerdrApi {
     /// Create a new workspace with the given label and optional cwd; returns
     /// its workspace id.
     fn create_workspace(&self, label: &str, cwd: Option<&str>) -> Result<String>;
-    /// Split a pane downward, returning the new pane id.
-    fn split_pane(&self, pane_id: &str) -> Result<String>;
+    /// Create a new tab in the given workspace, returning the new tab id.
+    fn create_tab(&self, workspace_id: &str) -> Result<String>;
 
     /// Execute a focus plan. The workspace and tab steps are required (an error
     /// propagates); the pane step is best-effort and its error is swallowed.
@@ -427,9 +427,9 @@ impl HerdrApi for CliHerdr {
         parse_created_workspace_id(&out)
     }
 
-    fn split_pane(&self, pane_id: &str) -> Result<String> {
-        let out = self.run(&["pane", "split", pane_id, "--direction", "down", "--no-focus"])?;
-        parse_split_pane_id(&out)
+    fn create_tab(&self, workspace_id: &str) -> Result<String> {
+        let out = self.run(&["tab", "create", "--workspace", workspace_id, "--no-focus"])?;
+        parse_created_tab_id(&out)
     }
 }
 
@@ -566,9 +566,9 @@ mod tests {
                 .push(format!("create:{label}:{}", cwd.unwrap_or("-")));
             Ok("wNEW".to_string())
         }
-        fn split_pane(&self, pane_id: &str) -> Result<String> {
-            self.calls.borrow_mut().push(format!("split:{pane_id}"));
-            Ok("wNEW:p9".to_string())
+        fn create_tab(&self, workspace_id: &str) -> Result<String> {
+            self.calls.borrow_mut().push(format!("tab:{workspace_id}"));
+            Ok(format!("{workspace_id}:tN"))
         }
     }
 
@@ -616,9 +616,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_split_pane_id() {
-        let json = r#"{"id":"cli:pane:split","result":{"type":"pane_split","pane":{"pane_id":"w1:p9","tab_id":"w1:t1","workspace_id":"w1"}}}"#;
-        assert_eq!(parse_split_pane_id(json).unwrap(), "w1:p9");
+    fn parses_created_tab_id() {
+        let json = r#"{"id":"cli:tab:create","result":{"type":"tab_created","tab":{"tab_id":"w1:t2","workspace_id":"w1","number":2},"root_pane":{"pane_id":"w1:pA"}}}"#;
+        assert_eq!(parse_created_tab_id(json).unwrap(), "w1:t2");
     }
 
     #[test]
