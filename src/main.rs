@@ -1,10 +1,14 @@
 mod herdr_client;
 mod tree;
+mod tui;
+mod view;
 
 use anyhow::Result;
 
 use herdr_client::{CliHerdr, HerdrApi};
 use tree::Tree;
+use tui::LoopOutcome;
+use view::TreeView;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -29,9 +33,17 @@ fn main() -> Result<()> {
             let tree = Tree::build(api.workspaces()?, api.tabs()?, api.panes()?);
             print!("{}", tree.to_indented_text());
         }
-        _ => {
-            println!("herdr-nav-preview: hello");
-        }
+        _ => run_tui()?,
+    }
+    Ok(())
+}
+
+fn run_tui() -> Result<()> {
+    let api = CliHerdr::new();
+    let tree = Tree::build(api.workspaces()?, api.tabs()?, api.panes()?);
+    let mut view = TreeView::new(tree);
+    match tui::run(&mut view)? {
+        LoopOutcome::Quit => {}
     }
     Ok(())
 }
