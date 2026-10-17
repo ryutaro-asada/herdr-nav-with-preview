@@ -244,6 +244,17 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
     Line::from(spans)
 }
 
+/// The project name for a cwd: its last path component (basename), matching
+/// herdr's native workspace auto-naming. Empty if the path has no component.
+fn project_name(cwd: &str) -> String {
+    let trimmed = cwd.trim_end_matches('/');
+    trimmed
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Truncate `s` so its display width fits in `max_width` columns, appending an
 /// ellipsis when truncated. Honors wide (CJK) characters so Japanese titles
 /// don't overrun the pane. Pure and unit-tested.
@@ -294,6 +305,9 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     // When `Some`, we're in the "new workspace name" text-entry mode and this
     // holds the current input buffer.
     let mut input_buf: Option<String> = None;
+    // The cwd to create the new workspace in (project dir), captured when the
+    // prompt opens so the new workspace inherits the right project.
+    let mut input_cwd: Option<String> = None;
 
     // The pane/tab/workspace the user was on when they opened the navigator.
     // After a destructive action (close) herdr may re-assign focus within our
@@ -348,15 +362,14 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                         match key.code {
                             KeyCode::Enter => {
                                 let label = buf.trim().to_string();
-                                // Buffer is pre-filled with the default number,
-                                // so an empty label shouldn't normally happen,
-                                // but guard anyway.
                                 let label = if label.is_empty() {
+                                    // Fall back to the project name or next
+                                    // workspace number if the field was cleared.
                                     view.tree().next_workspace_number().to_string()
                                 } else {
                                     label
                                 };
-                                match api.create_workspace(&label) {
+                                match api.create_workspace(&label, input_cwd.as_deref()) {
                                     Ok(new_id) => {
                                         status = Some(format!("created workspace {label}"));
                                         if let Ok(tree) = build_tree(api) {
@@ -373,10 +386,12 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                     }
                                 }
                                 input_buf = None;
+                                input_cwd = None;
                             }
                             KeyCode::Esc => {
                                 status = None;
                                 input_buf = None;
+                                input_cwd = None;
                             }
                             KeyCode::Backspace => {
                                 buf.pop();
@@ -446,10 +461,49 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
                             KeyCode::Char('n') => {
-                                // Start naming a new workspace; default to the
-                                // next workspace number so Enter alone works.
-                                let default = view.tree().next_workspace_number().to_string();
+                                // Add a pane: split the selected pane downward.
+                                let target = view
+                                    .selected_row()
+                                    .and_then(|r| {
+                                        r.representative_pane(view.tree())
+                                            .map(|p| p.pane_id.clone())
+                                    });
+                                match target {
+                                    Some(pid) => match api.split_pane(&pid) {
+                                        Ok(_new) => {
+                                            status = Some("added pane".to_string());
+                                            if let Ok(tree) = build_tree(api) {
+                                                view.set_tree(tree);
+                                            }
+                                            current_pane = None;
+                                            guard.terminal().clear().ok();
+                                        }
+                                        Err(e) => status = Some(format!("add pane failed: {e}")),
+                                    },
+                                    None => {
+                                        status = Some("select a pane to split".to_string());
+                                    }
+                                }
+                            }
+                            KeyCode::Char('N') => {
+                                // Add a workspace: open the name prompt, defaulting
+                                // to the selected project's directory name (like
+                                // herdr's native auto-naming), and remember its cwd.
+                                let cwd = view
+                                    .selected_row()
+                                    .and_then(|r| {
+                                        r.representative_pane(view.tree())
+                                            .and_then(|p| p.cwd.clone())
+                                    });
+                                let default = cwd
+                                    .as_deref()
+                                    .map(project_name)
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| {
+                                        view.tree().next_workspace_number().to_string()
+                                    });
                                 status = None;
+                                input_cwd = cwd;
                                 input_buf = Some(default);
                             }
                             KeyCode::Enter => {
@@ -622,7 +676,7 @@ pub fn draw(
                 .add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
-            " ↑/↓ move   ←/→ fold   ⏎ jump   n new   x close   q quit ",
+            " ↑/↓ move   ←/→ fold   ⏎ jump   n pane   N space   x close   q quit ",
             Style::default().fg(Color::DarkGray),
         )),
     };
@@ -633,6 +687,16 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::truncate_display;
+    use super::project_name;
+
+    #[test]
+    fn project_name_is_basename() {
+        assert_eq!(project_name("/Users/asaryu/job/tmp1/sptv-video"), "sptv-video");
+        assert_eq!(project_name("/Users/asaryu/job/tmp1/sptv-video/"), "sptv-video");
+        assert_eq!(project_name("/"), "");
+        assert_eq!(project_name("plain"), "plain");
+        assert_eq!(project_name("~/repos/herder-nav-with-preview"), "herder-nav-with-preview");
+    }
 
     #[test]
     fn no_truncation_when_fits() {

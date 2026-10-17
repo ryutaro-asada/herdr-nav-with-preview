@@ -12,6 +12,7 @@ pub struct PaneNode {
     pub title: String,
     pub agent: Option<String>,
     pub agent_status: Option<String>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +81,7 @@ impl Tree {
                                 title: p.display_title(),
                                 agent: p.agent.clone(),
                                 agent_status: p.agent_status.clone(),
+                                cwd: p.cwd.clone(),
                             })
                             .collect();
                         TabNode {

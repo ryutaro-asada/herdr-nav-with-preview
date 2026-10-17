@@ -233,6 +233,28 @@ pub fn parse_created_workspace_id(json: &str) -> Result<String> {
     Ok(env.result.workspace.workspace_id)
 }
 
+#[derive(Debug, Deserialize)]
+struct SplitPane {
+    pane_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SplitPaneResult {
+    pane: SplitPane,
+}
+
+#[derive(Debug, Deserialize)]
+struct SplitPaneEnvelope {
+    result: SplitPaneResult,
+}
+
+/// Parse the new pane id from `pane split` output (`.result.pane.pane_id`).
+pub fn parse_split_pane_id(json: &str) -> Result<String> {
+    let env: SplitPaneEnvelope =
+        serde_json::from_str(json).context("failed to parse `pane split` JSON")?;
+    Ok(env.result.pane.pane_id)
+}
+
 // --- CLI invocation ---
 
 /// A plan describing how to jump focus to a target, as an ordered list of
@@ -294,8 +316,11 @@ pub trait HerdrApi {
     fn focus_agent(&self, target: &str) -> Result<()>;
     /// Close (kill) a pane by id.
     fn close_pane(&self, pane_id: &str) -> Result<()>;
-    /// Create a new workspace with the given label; returns its workspace id.
-    fn create_workspace(&self, label: &str) -> Result<String>;
+    /// Create a new workspace with the given label and optional cwd; returns
+    /// its workspace id.
+    fn create_workspace(&self, label: &str, cwd: Option<&str>) -> Result<String>;
+    /// Split a pane downward, returning the new pane id.
+    fn split_pane(&self, pane_id: &str) -> Result<String>;
 
     /// Execute a focus plan. The workspace and tab steps are required (an error
     /// propagates); the pane step is best-effort and its error is swallowed.
@@ -392,9 +417,19 @@ impl HerdrApi for CliHerdr {
         self.run(&["pane", "close", pane_id]).map(|_| ())
     }
 
-    fn create_workspace(&self, label: &str) -> Result<String> {
-        let out = self.run(&["workspace", "create", "--label", label, "--no-focus"])?;
+    fn create_workspace(&self, label: &str, cwd: Option<&str>) -> Result<String> {
+        let mut args: Vec<&str> = vec!["workspace", "create", "--label", label, "--no-focus"];
+        if let Some(c) = cwd {
+            args.push("--cwd");
+            args.push(c);
+        }
+        let out = self.run(&args)?;
         parse_created_workspace_id(&out)
+    }
+
+    fn split_pane(&self, pane_id: &str) -> Result<String> {
+        let out = self.run(&["pane", "split", pane_id, "--direction", "down", "--no-focus"])?;
+        parse_split_pane_id(&out)
     }
 }
 
@@ -525,9 +560,15 @@ mod tests {
             self.calls.borrow_mut().push(format!("close:{pane_id}"));
             Ok(())
         }
-        fn create_workspace(&self, label: &str) -> Result<String> {
-            self.calls.borrow_mut().push(format!("create:{label}"));
+        fn create_workspace(&self, label: &str, cwd: Option<&str>) -> Result<String> {
+            self.calls
+                .borrow_mut()
+                .push(format!("create:{label}:{}", cwd.unwrap_or("-")));
             Ok("wNEW".to_string())
+        }
+        fn split_pane(&self, pane_id: &str) -> Result<String> {
+            self.calls.borrow_mut().push(format!("split:{pane_id}"));
+            Ok("wNEW:p9".to_string())
         }
     }
 
@@ -572,6 +613,12 @@ mod tests {
     fn parses_created_workspace_id() {
         let json = r#"{"id":"cli:workspace:create","result":{"type":"workspace_info","workspace":{"workspace_id":"wJ","label":"x","number":10},"root_pane":{"pane_id":"wJ:p1"}}}"#;
         assert_eq!(parse_created_workspace_id(json).unwrap(), "wJ");
+    }
+
+    #[test]
+    fn parses_split_pane_id() {
+        let json = r#"{"id":"cli:pane:split","result":{"type":"pane_split","pane":{"pane_id":"w1:p9","tab_id":"w1:t1","workspace_id":"w1"}}}"#;
+        assert_eq!(parse_split_pane_id(json).unwrap(), "w1:p9");
     }
 
     #[test]
