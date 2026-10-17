@@ -110,20 +110,25 @@ fn tab_key(id: &str) -> String {
     format!("t:{id}")
 }
 
-/// Compute the first visible row index so that `selected` stays within a
-/// window of `height` rows out of `total`. Pure and unit-tested.
-pub fn scroll_offset(selected: usize, total: usize, height: usize) -> usize {
+/// Compute the first visible row index for a window of `height` rows out of
+/// `total`, keeping `selected` visible while scrolling the *minimum* amount
+/// from `prev` (the previous offset). This makes scrolling sticky: the window
+/// only moves when the selection would leave it, so moving up one row doesn't
+/// drag the whole view and clip the bottom. Pure and unit-tested.
+pub fn scroll_offset(selected: usize, total: usize, height: usize, prev: usize) -> usize {
     if height == 0 || total <= height {
         return 0;
     }
     let max_offset = total - height;
-    // Keep the selection on screen: if it would fall below the window, scroll
-    // down just enough; the window never scrolls past the last row.
-    if selected < height {
-        0
-    } else {
-        (selected + 1 - height).min(max_offset)
+    let mut offset = prev.min(max_offset);
+    if selected < offset {
+        // Selection moved above the window: reveal it at the top.
+        offset = selected;
+    } else if selected >= offset + height {
+        // Selection moved below the window: reveal it at the bottom.
+        offset = selected + 1 - height;
     }
+    offset.min(max_offset)
 }
 
 pub struct TreeView {
@@ -531,19 +536,41 @@ mod tests {
 
     #[test]
     fn scroll_offset_behaviour() {
-        // Everything fits: no scroll.
-        assert_eq!(scroll_offset(0, 5, 10), 0);
-        assert_eq!(scroll_offset(4, 5, 5), 0);
+        // Everything fits: no scroll regardless of prev.
+        assert_eq!(scroll_offset(0, 5, 10, 0), 0);
+        assert_eq!(scroll_offset(4, 5, 5, 0), 0);
         // Zero height is a safe no-op.
-        assert_eq!(scroll_offset(3, 10, 0), 0);
-        // Selection within the first window: offset 0.
-        assert_eq!(scroll_offset(2, 20, 5), 0);
-        assert_eq!(scroll_offset(4, 20, 5), 0);
-        // Selection past the window: scroll so selection is the last visible row.
-        assert_eq!(scroll_offset(5, 20, 5), 1);
-        assert_eq!(scroll_offset(9, 20, 5), 5);
+        assert_eq!(scroll_offset(3, 10, 0, 0), 0);
+        // Selection already visible within [prev, prev+height): keep prev.
+        assert_eq!(scroll_offset(2, 20, 5, 0), 0);
+        assert_eq!(scroll_offset(4, 20, 5, 0), 0);
+        assert_eq!(scroll_offset(7, 20, 5, 5), 5); // 7 in [5,10): stay
+        // Selection below the window: reveal at bottom.
+        assert_eq!(scroll_offset(5, 20, 5, 0), 1); // 5 >= 0+5 -> 1
+        assert_eq!(scroll_offset(12, 20, 5, 5), 8); // 12 >= 10 -> 12+1-5
+        // Selection above the window: reveal at top (the bug we fixed — moving
+        // up should NOT drag the bottom; it stops as soon as selection shows).
+        assert_eq!(scroll_offset(3, 20, 5, 8), 3); // jumped up above window
+        assert_eq!(scroll_offset(9, 20, 5, 10), 9); // one above window top
         // Never scroll past the end.
-        assert_eq!(scroll_offset(19, 20, 5), 15);
+        assert_eq!(scroll_offset(19, 20, 5, 0), 15);
+        assert_eq!(scroll_offset(10, 20, 5, 99), 10); // prev clamped
+    }
+
+    #[test]
+    fn scroll_offset_sticky_up_does_not_clip_bottom() {
+        // 20 rows, window 5. Start at the very bottom (offset 15, selected 19).
+        let mut offset = scroll_offset(19, 20, 5, 15);
+        assert_eq!(offset, 15);
+        // Move up one at a time; the window must stay put until the selection
+        // reaches its top edge, instead of shifting every step.
+        for sel in (15..=19).rev() {
+            offset = scroll_offset(sel, 20, 5, offset);
+            assert_eq!(offset, 15, "window should not move while sel {sel} is visible");
+        }
+        // Now move above the top (14): window scrolls up by exactly one.
+        offset = scroll_offset(14, 20, 5, offset);
+        assert_eq!(offset, 14);
     }
 
     #[test]

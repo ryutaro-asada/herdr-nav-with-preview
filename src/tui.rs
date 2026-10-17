@@ -261,15 +261,27 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     // Only redraw when something actually changed. This keeps key handling
     // snappy and avoids re-flattening the tree / re-parsing ANSI every tick.
     let mut dirty = true;
+    // Persisted vertical scroll offset for the tree (sticky scrolling).
+    let mut scroll: usize = 0;
 
     loop {
         if dirty {
             let rows = view.rows();
             let selected = view.selected_index();
             let title = preview_title(&rows, selected);
+            let mut scroll_ref = scroll;
             guard.terminal().draw(|frame| {
-                draw(frame, &rows, selected, &preview_text, &title, status.as_deref())
+                draw(
+                    frame,
+                    &rows,
+                    selected,
+                    &preview_text,
+                    &title,
+                    status.as_deref(),
+                    &mut scroll_ref,
+                )
             })?;
+            scroll = scroll_ref;
             dirty = false;
         }
 
@@ -393,6 +405,7 @@ pub fn draw(
     preview_text: &Text<'static>,
     preview_title: &str,
     status: Option<&str>,
+    prev_offset: &mut usize,
 ) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -404,10 +417,12 @@ pub fn draw(
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(outer[0]);
 
-    // Vertical scroll: keep the selected row visible when the tree is taller
-    // than the pane. Inner height excludes the top/bottom border rows.
+    // Vertical scroll: keep the selected row visible, scrolling the minimum
+    // from the previous offset so moving up doesn't drag the view and clip the
+    // bottom. Inner height excludes the top/bottom border rows.
     let tree_inner_height = chunks[0].height.saturating_sub(2) as usize;
-    let offset = crate::view::scroll_offset(selected, rows.len(), tree_inner_height);
+    let offset = crate::view::scroll_offset(selected, rows.len(), tree_inner_height, *prev_offset);
+    *prev_offset = offset;
     // Inner width excludes the left/right borders; used to trim long labels.
     let tree_inner_width = chunks[0].width.saturating_sub(2) as usize;
 
