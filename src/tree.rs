@@ -90,6 +90,7 @@ impl Tree {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.workspaces.is_empty()
     }

@@ -66,7 +66,10 @@ impl Drop for TerminalGuard {
 /// Outcome of the event loop so the caller can act after the terminal has been
 /// restored.
 pub enum LoopOutcome {
+    /// User quit without jumping.
     Quit,
+    /// User pressed Enter and focus was moved to this row's target.
+    Jumped,
 }
 
 /// Resolve the pane id to preview for the currently selected row.
@@ -79,13 +82,14 @@ fn selected_pane_id(view: &TreeView) -> Option<String> {
 /// preview once per second; the loop polls for key events with a short timeout
 /// and drains preview updates each iteration, applying only current-generation
 /// results. The `Poller` is stopped and joined when it drops at scope exit.
-pub fn run(view: &mut TreeView, _api: &dyn HerdrApi) -> Result<LoopOutcome> {
+pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     let mut guard = TerminalGuard::new()?;
 
     let mut poll_state = PollState::new();
     let mut current_pane = selected_pane_id(view);
     let generation = poll_state.generation();
     let mut preview = String::new();
+    let mut status: Option<String> = None;
 
     let poller = Poller::spawn(PollRequest {
         generation,
@@ -93,13 +97,26 @@ pub fn run(view: &mut TreeView, _api: &dyn HerdrApi) -> Result<LoopOutcome> {
     });
 
     loop {
-        guard.terminal().draw(|frame| draw(frame, view, &preview))?;
+        guard
+            .terminal()
+            .draw(|frame| draw(frame, view, &preview, status.as_deref()))?;
 
         if event::poll(EVENT_POLL)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
+                        KeyCode::Enter => {
+                            if let Some(row) = view.selected_row() {
+                                let plan = row.focus_plan(view.tree());
+                                match api.apply_focus(&plan) {
+                                    Ok(()) => return Ok(LoopOutcome::Jumped),
+                                    Err(e) => {
+                                        status = Some(format!("focus failed: {e}"));
+                                    }
+                                }
+                            }
+                        }
                         KeyCode::Down | KeyCode::Char('j') => view.move_down(),
                         KeyCode::Up | KeyCode::Char('k') => view.move_up(),
                         KeyCode::Right | KeyCode::Char('l') => view.expand(),
@@ -134,12 +151,18 @@ pub fn run(view: &mut TreeView, _api: &dyn HerdrApi) -> Result<LoopOutcome> {
     }
 }
 
-/// Draw the two-pane layout: tree on the left, preview on the right.
-pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str) {
+/// Draw the two-pane layout: tree on the left, preview on the right, plus a
+/// help/status bar at the bottom.
+pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str, status: Option<&str>) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(frame.area());
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(frame.area());
+        .split(outer[0]);
 
     let rows = view.rows();
     let selected = view.selected_index();
@@ -197,4 +220,16 @@ pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str) {
     let preview_widget =
         Paragraph::new(clipped).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(preview_widget, chunks[1]);
+
+    // Bottom help/status bar.
+    let bar = match status {
+        Some(s) => Line::from(Span::styled(
+            format!(" {s} "),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        None => Line::from(
+            " ↑/↓ move  ←/→ collapse/expand  space toggle  Enter jump  q/Esc quit ".to_string(),
+        ),
+    };
+    frame.render_widget(Paragraph::new(bar), outer[1]);
 }

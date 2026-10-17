@@ -61,6 +61,36 @@ impl Row {
                 .and_then(|t| t.panes.first()),
         }
     }
+
+    /// Build the focus plan for jumping to this row. For a workspace or tab we
+    /// also target their representative pane so the jump lands as precisely as
+    /// the backend allows.
+    pub fn focus_plan(&self, tree: &Tree) -> crate::herdr_client::FocusPlan {
+        use crate::herdr_client::FocusPlan;
+        match &self.kind {
+            RowKind::Pane {
+                workspace_id,
+                tab_id,
+                pane_id,
+            } => FocusPlan::pane(workspace_id, tab_id, pane_id),
+            RowKind::Tab {
+                workspace_id,
+                tab_id,
+            } => {
+                let mut plan = FocusPlan::tab(workspace_id, tab_id);
+                plan.pane_id = self.representative_pane(tree).map(|p| p.pane_id.clone());
+                plan
+            }
+            RowKind::Workspace { workspace_id } => {
+                let mut plan = FocusPlan::workspace(workspace_id);
+                if let Some(p) = self.representative_pane(tree) {
+                    plan.tab_id = Some(p.tab_id.clone());
+                    plan.pane_id = Some(p.pane_id.clone());
+                }
+                plan
+            }
+        }
+    }
 }
 
 /// A unique key for a collapsible node (workspace or tab).
@@ -96,6 +126,7 @@ impl TreeView {
     }
 
     /// Replace the underlying tree (e.g. after a refresh), clamping selection.
+    #[allow(dead_code)]
     pub fn set_tree(&mut self, tree: Tree) {
         self.tree = tree;
         let max = self.rows().len().saturating_sub(1);
@@ -369,5 +400,30 @@ mod tests {
         // Replace with an empty tree; selection must clamp to 0.
         view.set_tree(Tree::default());
         assert_eq!(view.selected_index(), 0);
+    }
+
+    #[test]
+    fn focus_plan_for_each_row_kind() {
+        let view = TreeView::new(sample_tree());
+        let rows = view.rows();
+        let tree = view.tree();
+
+        // Workspace row -> workspace + its first tab/pane.
+        let wp = rows[0].focus_plan(tree);
+        assert_eq!(wp.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(wp.tab_id.as_deref(), Some("w1:t1"));
+        assert_eq!(wp.pane_id.as_deref(), Some("w1:p1"));
+
+        // Tab row (index 3 is w1:t2) -> workspace + tab + its pane.
+        let tp = rows[3].focus_plan(tree);
+        assert_eq!(tp.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(tp.tab_id.as_deref(), Some("w1:t2"));
+        assert_eq!(tp.pane_id.as_deref(), Some("w1:p2"));
+
+        // Pane row (index 2 is w1:p1) -> full triple.
+        let pp = rows[2].focus_plan(tree);
+        assert_eq!(pp.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(pp.tab_id.as_deref(), Some("w1:t1"));
+        assert_eq!(pp.pane_id.as_deref(), Some("w1:p1"));
     }
 }

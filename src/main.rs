@@ -45,6 +45,7 @@ fn run_tui() -> Result<()> {
     let mut view = TreeView::new(tree);
     match tui::run(&mut view, &api)? {
         LoopOutcome::Quit => {}
+        LoopOutcome::Jumped => {}
     }
     Ok(())
 }

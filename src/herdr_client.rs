@@ -146,6 +146,50 @@ pub fn parse_panes(json: &str) -> Result<Vec<Pane>> {
 
 // --- CLI invocation ---
 
+/// A plan describing how to jump focus to a target, as an ordered list of
+/// herdr focus steps. On herdr 0.7.x there is no "focus pane by id", so we
+/// focus the workspace, then the tab (which brings its pane forward), and
+/// finally attempt `agent focus <pane_id>` as a best-effort for pane-level
+/// precision. Steps are applied in order; a failing best-effort step does not
+/// fail the jump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusPlan {
+    pub workspace_id: Option<String>,
+    pub tab_id: Option<String>,
+    /// Best-effort pane focus via `agent focus <pane_id>`; failures ignored.
+    pub pane_id: Option<String>,
+}
+
+impl FocusPlan {
+    pub fn workspace(workspace_id: impl Into<String>) -> Self {
+        Self {
+            workspace_id: Some(workspace_id.into()),
+            tab_id: None,
+            pane_id: None,
+        }
+    }
+
+    pub fn tab(workspace_id: impl Into<String>, tab_id: impl Into<String>) -> Self {
+        Self {
+            workspace_id: Some(workspace_id.into()),
+            tab_id: Some(tab_id.into()),
+            pane_id: None,
+        }
+    }
+
+    pub fn pane(
+        workspace_id: impl Into<String>,
+        tab_id: impl Into<String>,
+        pane_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            workspace_id: Some(workspace_id.into()),
+            tab_id: Some(tab_id.into()),
+            pane_id: Some(pane_id.into()),
+        }
+    }
+}
+
 /// Trait so the TUI can depend on an abstraction and tests can inject fakes.
 pub trait HerdrApi {
     fn workspaces(&self) -> Result<Vec<Workspace>>;
@@ -155,6 +199,22 @@ pub trait HerdrApi {
     fn focus_workspace(&self, workspace_id: &str) -> Result<()>;
     fn focus_tab(&self, tab_id: &str) -> Result<()>;
     fn focus_agent(&self, target: &str) -> Result<()>;
+
+    /// Execute a focus plan. The workspace and tab steps are required (an error
+    /// propagates); the pane step is best-effort and its error is swallowed.
+    fn apply_focus(&self, plan: &FocusPlan) -> Result<()> {
+        if let Some(ws) = &plan.workspace_id {
+            self.focus_workspace(ws)?;
+        }
+        if let Some(tab) = &plan.tab_id {
+            self.focus_tab(tab)?;
+        }
+        if let Some(pane) = &plan.pane_id {
+            // Best effort: pane-level focus is not guaranteed on all versions.
+            let _ = self.focus_agent(pane);
+        }
+        Ok(())
+    }
 }
 
 /// Real implementation that shells out to the herdr binary.
@@ -305,5 +365,75 @@ mod tests {
     fn invalid_json_errors() {
         assert!(parse_workspaces("not json").is_err());
         assert!(parse_panes(r#"{"result":{}}"#).is_ok()); // panes defaults to empty
+    }
+
+    use std::cell::RefCell;
+
+    /// Fake API that records the focus calls made against it, in order.
+    #[derive(Default)]
+    struct FakeApi {
+        calls: RefCell<Vec<String>>,
+        fail_agent: bool,
+    }
+
+    impl HerdrApi for FakeApi {
+        fn workspaces(&self) -> Result<Vec<Workspace>> {
+            Ok(vec![])
+        }
+        fn tabs(&self) -> Result<Vec<Tab>> {
+            Ok(vec![])
+        }
+        fn panes(&self) -> Result<Vec<Pane>> {
+            Ok(vec![])
+        }
+        fn read_pane(&self, _pane_id: &str, _lines: u32) -> Result<String> {
+            Ok(String::new())
+        }
+        fn focus_workspace(&self, workspace_id: &str) -> Result<()> {
+            self.calls.borrow_mut().push(format!("ws:{workspace_id}"));
+            Ok(())
+        }
+        fn focus_tab(&self, tab_id: &str) -> Result<()> {
+            self.calls.borrow_mut().push(format!("tab:{tab_id}"));
+            Ok(())
+        }
+        fn focus_agent(&self, target: &str) -> Result<()> {
+            self.calls.borrow_mut().push(format!("agent:{target}"));
+            if self.fail_agent {
+                Err(anyhow!("agent focus failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn apply_focus_runs_steps_in_order() {
+        let api = FakeApi::default();
+        let plan = FocusPlan::pane("w1", "w1:t1", "w1:p1");
+        api.apply_focus(&plan).unwrap();
+        assert_eq!(
+            *api.calls.borrow(),
+            vec!["ws:w1", "tab:w1:t1", "agent:w1:p1"]
+        );
+    }
+
+    #[test]
+    fn apply_focus_ignores_agent_failure() {
+        let api = FakeApi {
+            fail_agent: true,
+            ..Default::default()
+        };
+        let plan = FocusPlan::pane("w1", "w1:t1", "w1:p1");
+        // Best-effort pane focus failure must not fail the whole jump.
+        assert!(api.apply_focus(&plan).is_ok());
+    }
+
+    #[test]
+    fn apply_focus_workspace_only() {
+        let api = FakeApi::default();
+        let plan = FocusPlan::workspace("w2");
+        api.apply_focus(&plan).unwrap();
+        assert_eq!(*api.calls.borrow(), vec!["ws:w2"]);
     }
 }
