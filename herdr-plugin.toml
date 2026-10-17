@@ -10,10 +10,15 @@ platforms = ["linux", "macos", "windows"]
 [[build]]
 command = ["cargo", "build", "--release"]
 
-# The overlay entrypoint. Opens a temporary zoomed overlay over the active pane
-# and restores the previous focus/zoom when it closes.
+# The navigator entrypoint. `popup` opens a session-modal terminal that does
+# NOT change the tab layout: it is not a herdr pane, carries no HERDR_PANE_ID,
+# and leaves no stray pane behind when it closes. This avoids the overlay being
+# added as an extra pane in the active tab (and the focus/duplication issues
+# that come with closing panes while it is open).
 [[panes]]
 id = "nav"
 title = "Nav with Preview"
-placement = "overlay"
+placement = "popup"
+width = "80%"
+height = "80%"
 command = ["./target/release/herdr-nav-preview"]

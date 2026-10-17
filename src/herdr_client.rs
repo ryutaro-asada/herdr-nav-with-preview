@@ -26,15 +26,20 @@ pub fn herdr_bin() -> String {
 
 /// The navigator's own overlay pane id, if launched as a plugin pane. herdr
 /// sets `HERDR_PANE_ID` to the running pane; we exclude it from the tree so the
-/// navigator doesn't list itself.
+/// navigator doesn't list itself. Popups are not panes and have no
+/// `HERDR_PANE_ID`, in which case this is `None` (and nothing needs excluding).
 pub fn own_pane_id() -> Option<String> {
     std::env::var("HERDR_PANE_ID").ok().filter(|s| !s.is_empty())
 }
 
-/// The tab the navigator's overlay lives in (`HERDR_TAB_ID`). Closing panes in
-/// this tab would take the overlay down with it, so the UI refuses to.
+/// The tab the navigator was launched from. Prefer `HERDR_TAB_ID` (set for
+/// pane entrypoints); fall back to the launch context's `tab_id` (popups don't
+/// get `HERDR_TAB_ID` but still receive `HERDR_PLUGIN_CONTEXT_JSON`).
 pub fn own_tab_id() -> Option<String> {
-    std::env::var("HERDR_TAB_ID").ok().filter(|s| !s.is_empty())
+    std::env::var("HERDR_TAB_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| LaunchContext::from_env().tab_id)
 }
 
 /// The pane/tab/workspace the overlay was launched from, so the navigator can

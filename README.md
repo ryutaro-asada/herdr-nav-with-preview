@@ -4,15 +4,19 @@ A [herdr](https://herdr.dev) plugin that adds a tmux `Ctrl+b w` style navigator
 with a live preview to herdr.
 
 The native herdr navigator lists your workspaces, but it does not show what is
-*inside* each session. This plugin opens a full-screen overlay TUI with a
+*inside* each session. This plugin opens a full-screen **popup** TUI with a
 `workspace > tab > pane` tree on the left and a **live preview** of the selected
 pane on the right. Press `Enter` to jump straight to the pane.
 
+The popup is a session-modal window: it does not add a pane to your layout and
+leaves nothing behind when it closes.
+
 ## Features
 
-- Collapsible `workspace > tab > pane` tree.
+- Collapsible `workspace > tab > pane` tree with per-kind icons and agent status.
 - Live preview of the selected pane, refreshed about once per second.
-- `Enter` focuses the selected pane and closes the overlay.
+- `Enter` focuses the selected pane and closes the navigator.
+- `n` creates a new workspace; `x` closes the selected pane (with confirmation).
 - Single self-contained Rust binary, built with `cargo build --release`.
 
 ## Keys
@@ -21,8 +25,9 @@ pane on the right. Press `Enter` to jump straight to the pane.
 | --- | --- |
 | `↑` / `↓` (or `k` / `j`) | Move selection |
 | `←` / `→` (or `h` / `l`) | Collapse / expand |
-| `space` | Toggle collapse |
-| `Enter` | Focus the selected pane and close the overlay |
+| `n` | Create a new workspace (name prompt; defaults to the next number) |
+| `x` | Close the selected pane (`y`/`Enter` to confirm) |
+| `Enter` | Focus the selected pane and close the navigator |
 | `q` / `Esc` | Quit without jumping |
 
 ## Requirements
@@ -38,7 +43,7 @@ herdr plugin install ryutaro-asada/herdr-nav-with-preview
 
 ## Local development
 
-Link your working copy, build the binary, then open the overlay:
+Link your working copy, build the binary, then open the navigator:
 
 ```sh
 cargo build --release
@@ -51,14 +56,14 @@ yourself first. `herdr plugin install` runs the `[[build]]` step for you.
 
 ## Keybinding
 
-herdr's manifest keybindings target plugin actions, but the overlay here is a
-pane entrypoint, so bind a key in your own `~/.config/herdr/config.toml`:
+The navigator is a `popup` pane entrypoint, so bind a key in your own
+`~/.config/herdr/config.toml` to the command that opens it:
 
 ```toml
 [[keys.command]]
 key = "prefix+W"
-type = "pane"
-command = ["herdr", "plugin", "pane", "open", "--plugin", "ryutaroasada.nav-with-preview", "--entrypoint", "nav"]
+type = "shell"
+command = "herdr plugin pane open --plugin ryutaroasada.nav-with-preview --entrypoint nav"
 ```
 
 `prefix+w` (lowercase) is herdr's built-in workspace navigator, so this plugin
@@ -72,7 +77,7 @@ uses `prefix+W` (shift) to avoid clobbering it. Pick any free chord you like.
 - **Empty tree** — open at least one workspace in herdr first.
 - **Pane won't launch** — the manifest runs `./target/release/herdr-nav-preview`
   relative to the plugin root, so build the release binary before opening the
-  overlay (`herdr plugin install` does this for you via the `[[build]]` step).
+  navigator (`herdr plugin install` does this for you via the `[[build]]` step).
 
 ## License
 
