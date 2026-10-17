@@ -43,6 +43,11 @@ pub struct Row {
     pub focused: bool,
     /// True when this row is the last child under its parent (for tree glyphs).
     pub is_last: bool,
+    /// For each ancestor level (excluding this node), whether that ancestor was
+    /// the last child. Used to draw continuous vertical tree lines: a level
+    /// draws `│ ` when the ancestor still has siblings below, or `  ` when it
+    /// was the last child.
+    pub ancestors_last: Vec<bool>,
 }
 
 impl Row {
@@ -225,6 +230,7 @@ impl TreeView {
             } else {
                 label
             };
+            let w_is_last = wi + 1 == ws_count;
             rows.push(Row {
                 depth: 0,
                 name,
@@ -236,7 +242,8 @@ impl TreeView {
                 agent_status: w.agent_status.clone(),
                 agent: None,
                 focused: w.focused,
-                is_last: wi + 1 == ws_count,
+                is_last: w_is_last,
+                ancestors_last: vec![],
             });
             if w_collapsed {
                 continue;
@@ -260,6 +267,7 @@ impl TreeView {
                 } else {
                     tlabel.to_string()
                 };
+                let t_is_last = ti + 1 == tab_count;
                 rows.push(Row {
                     depth: 1,
                     name: tname,
@@ -272,7 +280,8 @@ impl TreeView {
                     agent_status: t.agent_status.clone(),
                     agent: None,
                     focused: false,
-                    is_last: ti + 1 == tab_count,
+                    is_last: t_is_last,
+                    ancestors_last: vec![w_is_last],
                 });
                 if t_collapsed {
                     continue;
@@ -293,6 +302,7 @@ impl TreeView {
                         agent: p.agent.clone(),
                         focused: false,
                         is_last: pi + 1 == pane_count,
+                        ancestors_last: vec![w_is_last, t_is_last],
                     });
                 }
             }

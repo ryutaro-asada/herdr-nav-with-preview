@@ -130,18 +130,25 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         spans.push(Span::raw(" "));
     }
 
-    // Indent + tree branch glyph for tabs/panes.
-    match row.depth {
-        0 => {}
-        1 => {
-            let branch = if row.is_last { "└─ " } else { "├─ " };
-            spans.push(Span::styled(branch, base(Style::default().fg(Color::DarkGray))));
+    // Indent + continuous tree lines for tabs/panes.
+    //
+    // Each workspace is its own small tree, so we don't draw a vertical line at
+    // the workspace level (the first `ancestors_last` entry). For the remaining
+    // ancestor levels draw "│ " (ancestor still has siblings below) or "  "
+    // (ancestor was the last child), then the node's own branch "├─"/"└─".
+    if row.depth > 0 {
+        let mut tree_prefix = String::new();
+        // Skip the workspace-level ancestor (index 0); start the vertical lines
+        // from the tab level downward.
+        for &anc_last in row.ancestors_last.iter().skip(1) {
+            tree_prefix.push_str(if anc_last { "  " } else { "│ " });
         }
-        _ => {
-            spans.push(Span::styled("   ", base(Style::default().fg(Color::DarkGray))));
-            let branch = if row.is_last { "└─ " } else { "├─ " };
-            spans.push(Span::styled(branch, base(Style::default().fg(Color::DarkGray))));
-        }
+        tree_prefix.push_str(if row.is_last { "└─" } else { "├─" });
+        tree_prefix.push(' ');
+        spans.push(Span::styled(
+            tree_prefix,
+            base(Style::default().fg(Color::DarkGray)),
+        ));
     }
 
     // Expand/collapse caret for expandable nodes.
