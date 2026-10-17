@@ -14,7 +14,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
     Terminal,
@@ -76,6 +76,106 @@ pub enum LoopOutcome {
 fn selected_pane_id(view: &TreeView) -> Option<String> {
     let row = view.selected_row()?;
     row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
+}
+
+/// Color for an agent status, matching herdr's semantics.
+fn status_color(status: Option<&str>) -> Color {
+    match status {
+        Some("working") => Color::Yellow,
+        Some("blocked") => Color::Red,
+        Some("idle") => Color::Green,
+        Some("done") => Color::Cyan,
+        _ => Color::DarkGray,
+    }
+}
+
+/// A small status dot glyph; filled when the agent is active/needs attention.
+fn status_glyph(status: Option<&str>) -> &'static str {
+    match status {
+        Some("working") | Some("blocked") | Some("done") => "●",
+        Some("idle") => "○",
+        _ => "·",
+    }
+}
+
+/// Build a styled line for one tree row, herdr-navigator style:
+/// `▎ <tree-glyph> <status-dot> <name> [agent]`.
+fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'static> {
+    use crate::view::RowKind;
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    // Selection bar in the first column.
+    if selected {
+        spans.push(Span::styled("▎", Style::default().fg(Color::Cyan)));
+    } else {
+        spans.push(Span::raw(" "));
+    }
+
+    // Indent + tree branch glyph for tabs/panes.
+    match row.depth {
+        0 => {}
+        1 => {
+            let branch = if row.is_last { "└─ " } else { "├─ " };
+            spans.push(Span::styled(branch, Style::default().fg(Color::DarkGray)));
+        }
+        _ => {
+            // Panes hang one level deeper than their tab.
+            spans.push(Span::styled("   ", Style::default().fg(Color::DarkGray)));
+            let branch = if row.is_last { "└─ " } else { "├─ " };
+            spans.push(Span::styled(branch, Style::default().fg(Color::DarkGray)));
+        }
+    }
+
+    // Expand/collapse caret for expandable nodes.
+    if row.expandable {
+        let caret = if row.expanded { "▾ " } else { "▸ " };
+        spans.push(Span::styled(caret, Style::default().fg(Color::DarkGray)));
+    }
+
+    // Agent status dot.
+    let status = row.agent_status.as_deref();
+    if !matches!(row.kind, RowKind::Workspace { .. }) || status.is_some() {
+        spans.push(Span::styled(
+            format!("{} ", status_glyph(status)),
+            Style::default().fg(status_color(status)),
+        ));
+    }
+
+    // The name. Workspaces bold; focused workspace cyan.
+    let mut name_style = Style::default();
+    match row.kind {
+        RowKind::Workspace { .. } => {
+            name_style = name_style.add_modifier(Modifier::BOLD);
+            if row.focused {
+                name_style = name_style.fg(Color::Cyan);
+            }
+        }
+        RowKind::Tab { .. } => {
+            name_style = name_style.fg(Color::Gray);
+        }
+        RowKind::Pane { .. } => {}
+    }
+    if selected {
+        name_style = name_style.add_modifier(Modifier::BOLD);
+    }
+
+    // Compose name + optional agent badge, then truncate to width.
+    let agent_badge = row
+        .agent
+        .as_deref()
+        .map(|a| format!("  {a}"))
+        .unwrap_or_default();
+    // Reserve roughly the width already consumed by prefix spans.
+    let used: usize = spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let avail = width.saturating_sub(used);
+    let name = truncate_display(&format!("{}{}", row.name, agent_badge), avail.max(1));
+    spans.push(Span::styled(name, name_style));
+
+    Line::from(spans)
 }
 
 /// Truncate `s` so its display width fits in `max_width` columns, appending an
@@ -244,41 +344,38 @@ pub fn draw(
         .skip(offset)
         .take(tree_inner_height.max(1))
     {
-        let indent = "  ".repeat(row.depth);
-        let marker = if row.expandable {
-            if row.expanded {
-                "▾ "
-            } else {
-                "▸ "
-            }
-        } else {
-            "  "
-        };
-        let content = truncate_display(&format!("{indent}{marker}{}", row.label), tree_inner_width);
-        let style = if i == selected {
-            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(content, style)));
+        lines.push(row_line(row, i == selected, tree_inner_width));
     }
     if lines.is_empty() {
-        lines.push(Line::from(
-            "No workspaces found. Open a workspace in herdr first.",
-        ));
+        lines.push(Line::from(Span::styled(
+            " No workspaces open — start one in herdr first.",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 
     let tree_widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" workspaces "),
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                " spaces ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
     );
     frame.render_widget(tree_widget, chunks[0]);
 
     let preview_widget = Paragraph::new(preview_text.clone()).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(preview_title.to_string()),
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                preview_title.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
     );
     frame.render_widget(preview_widget, chunks[1]);
 

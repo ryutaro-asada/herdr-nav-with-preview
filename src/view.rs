@@ -28,12 +28,21 @@ pub enum RowKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub depth: usize,
-    pub label: String,
+    /// Clean display name (no internal ids): workspace/tab label or pane title.
+    pub name: String,
     pub kind: RowKind,
     /// True when the node has children and can be expanded/collapsed.
     pub expandable: bool,
     /// True when the node is currently expanded.
     pub expanded: bool,
+    /// Agent status for the node (`working`/`idle`/`blocked`/`done`/`unknown`).
+    pub agent_status: Option<String>,
+    /// Agent kind badge for pane rows (e.g. `claude`).
+    pub agent: Option<String>,
+    /// True when this node is the focused workspace.
+    pub focused: bool,
+    /// True when this row is the last child under its parent (for tree glyphs).
+    pub is_last: bool,
 }
 
 impl Row {
@@ -158,47 +167,78 @@ impl TreeView {
     /// Compute the currently visible rows given collapse state.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        for w in &self.tree.workspaces {
+        let ws_count = self.tree.workspaces.len();
+        for (wi, w) in self.tree.workspaces.iter().enumerate() {
             let wkey = ws_key(&w.workspace_id);
             let w_collapsed = self.is_collapsed(&wkey);
-            let marker = if w.focused { " *" } else { "" };
+            // Workspace name: "number  label" with a clean fallback.
+            let label = if w.label.trim().is_empty() {
+                w.workspace_id.clone()
+            } else {
+                w.label.clone()
+            };
+            let name = if w.number > 0 {
+                format!("{}  {}", w.number, label)
+            } else {
+                label
+            };
             rows.push(Row {
                 depth: 0,
-                label: format!("{} [{}]{}", w.workspace_id, w.label, marker),
+                name,
                 kind: RowKind::Workspace {
                     workspace_id: w.workspace_id.clone(),
                 },
                 expandable: !w.tabs.is_empty(),
                 expanded: !w_collapsed,
+                agent_status: w.agent_status.clone(),
+                agent: None,
+                focused: w.focused,
+                is_last: wi + 1 == ws_count,
             });
             if w_collapsed {
                 continue;
             }
-            for t in &w.tabs {
+            let tab_count = w.tabs.len();
+            for (ti, t) in w.tabs.iter().enumerate() {
                 let tkey = tab_key(&t.tab_id);
                 let t_collapsed = self.is_collapsed(&tkey);
+                let tlabel = t.label.trim();
+                // Tab labels are often just the tab number; avoid showing
+                // "2  2". Show "#N" when the label is empty or equals the
+                // number, otherwise "N  label".
+                let tname = if tlabel.is_empty() || tlabel == t.number.to_string() {
+                    if t.number > 0 {
+                        format!("#{}", t.number)
+                    } else {
+                        t.tab_id.clone()
+                    }
+                } else if t.number > 0 {
+                    format!("{}  {}", t.number, tlabel)
+                } else {
+                    tlabel.to_string()
+                };
                 rows.push(Row {
                     depth: 1,
-                    label: format!("{} ({})", t.tab_id, t.label),
+                    name: tname,
                     kind: RowKind::Tab {
                         workspace_id: t.workspace_id.clone(),
                         tab_id: t.tab_id.clone(),
                     },
                     expandable: !t.panes.is_empty(),
                     expanded: !t_collapsed,
+                    agent_status: t.agent_status.clone(),
+                    agent: None,
+                    focused: false,
+                    is_last: ti + 1 == tab_count,
                 });
                 if t_collapsed {
                     continue;
                 }
-                for p in &t.panes {
-                    let agent = p
-                        .agent
-                        .as_deref()
-                        .map(|a| format!(" <{a}>"))
-                        .unwrap_or_default();
+                let pane_count = t.panes.len();
+                for (pi, p) in t.panes.iter().enumerate() {
                     rows.push(Row {
                         depth: 2,
-                        label: format!("{}{}", p.title, agent),
+                        name: p.title.clone(),
                         kind: RowKind::Pane {
                             workspace_id: p.workspace_id.clone(),
                             tab_id: p.tab_id.clone(),
@@ -206,6 +246,10 @@ impl TreeView {
                         },
                         expandable: false,
                         expanded: false,
+                        agent_status: p.agent_status.clone(),
+                        agent: p.agent.clone(),
+                        focused: false,
+                        is_last: pi + 1 == pane_count,
                     });
                 }
             }
@@ -276,6 +320,7 @@ mod tests {
         let ws = vec![Workspace {
             workspace_id: "w1".into(),
             label: "proj".into(),
+            number: 1,
             active_tab_id: None,
             tab_count: 2,
             pane_count: 2,
@@ -287,6 +332,7 @@ mod tests {
                 tab_id: "w1:t1".into(),
                 workspace_id: "w1".into(),
                 label: "a".into(),
+                number: 1,
                 pane_count: 1,
                 focused: false,
                 agent_status: None,
@@ -295,6 +341,7 @@ mod tests {
                 tab_id: "w1:t2".into(),
                 workspace_id: "w1".into(),
                 label: "b".into(),
+                number: 2,
                 pane_count: 1,
                 focused: false,
                 agent_status: None,
@@ -334,11 +381,13 @@ mod tests {
         // 1 workspace + 2 tabs + 2 panes = 5 rows.
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].depth, 0);
-        assert!(rows[0].label.contains("w1 [proj] *"));
+        // Workspace shows "number  label" and is marked focused.
+        assert!(rows[0].name.contains("proj"));
+        assert!(rows[0].focused);
         assert_eq!(rows[1].depth, 1);
         assert_eq!(rows[2].depth, 2);
-        assert!(rows[2].label.contains("shell-a"));
-        assert!(rows[4].label.contains("<claude>"));
+        assert_eq!(rows[2].name, "shell-a");
+        assert_eq!(rows[4].agent.as_deref(), Some("claude"));
     }
 
     #[test]

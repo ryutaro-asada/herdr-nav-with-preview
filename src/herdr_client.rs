@@ -31,6 +31,8 @@ pub struct Workspace {
     #[serde(default)]
     pub label: String,
     #[serde(default)]
+    pub number: u32,
+    #[serde(default)]
     pub active_tab_id: Option<String>,
     #[serde(default)]
     pub tab_count: u32,
@@ -49,6 +51,8 @@ pub struct Tab {
     pub workspace_id: String,
     #[serde(default)]
     pub label: String,
+    #[serde(default)]
+    pub number: u32,
     #[serde(default)]
     pub pane_count: u32,
     #[serde(default)]

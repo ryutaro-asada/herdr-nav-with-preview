@@ -19,6 +19,8 @@ pub struct TabNode {
     pub tab_id: String,
     pub workspace_id: String,
     pub label: String,
+    pub number: u32,
+    pub agent_status: Option<String>,
     pub panes: Vec<PaneNode>,
 }
 
@@ -26,7 +28,9 @@ pub struct TabNode {
 pub struct WorkspaceNode {
     pub workspace_id: String,
     pub label: String,
+    pub number: u32,
     pub focused: bool,
+    pub agent_status: Option<String>,
     pub tabs: Vec<TabNode>,
 }
 
@@ -72,6 +76,8 @@ impl Tree {
                             tab_id: t.tab_id.clone(),
                             workspace_id: t.workspace_id.clone(),
                             label: t.label.clone(),
+                            number: t.number,
+                            agent_status: t.agent_status.clone(),
                             panes: pane_nodes,
                         }
                     })
@@ -79,7 +85,9 @@ impl Tree {
                 WorkspaceNode {
                     workspace_id: w.workspace_id.clone(),
                     label: w.label.clone(),
+                    number: w.number,
                     focused: w.focused,
+                    agent_status: w.agent_status.clone(),
                     tabs: tab_nodes,
                 }
             })
@@ -131,6 +139,7 @@ mod tests {
         Workspace {
             workspace_id: id.into(),
             label: label.into(),
+            number: 0,
             active_tab_id: None,
             tab_count: 0,
             pane_count: 0,
@@ -144,6 +153,7 @@ mod tests {
             tab_id: id.into(),
             workspace_id: ws.into(),
             label: label.into(),
+            number: 0,
             pane_count: 0,
             focused: false,
             agent_status: None,
