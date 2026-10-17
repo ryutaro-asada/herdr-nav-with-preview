@@ -24,6 +24,13 @@ pub fn herdr_bin() -> String {
     std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
 }
 
+/// The navigator's own overlay pane id, if launched as a plugin pane. herdr
+/// sets `HERDR_PANE_ID` to the running pane; we exclude it from the tree so the
+/// navigator doesn't list itself.
+pub fn own_pane_id() -> Option<String> {
+    std::env::var("HERDR_PANE_ID").ok().filter(|s| !s.is_empty())
+}
+
 /// The pane/tab/workspace the overlay was launched from, so the navigator can
 /// preselect the row for the pane the user was on. herdr injects
 /// `HERDR_PLUGIN_CONTEXT_JSON` (richest, includes `focused_pane_id`) plus
@@ -126,7 +133,8 @@ pub struct Pane {
 
 impl Pane {
     /// Human-friendly one-line label for the pane, preferring a stripped
-    /// terminal title, then the raw title, then the pane id.
+    /// terminal title, then the raw title, then the agent name, then a generic
+    /// "shell". Never falls back to the raw pane id, which looks like noise.
     pub fn display_title(&self) -> String {
         self.terminal_title_stripped
             .as_deref()
@@ -134,7 +142,8 @@ impl Pane {
             .or(self.terminal_title.as_deref())
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| self.pane_id.clone())
+            .or_else(|| self.agent.clone().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| "shell".to_string())
     }
 }
 
@@ -420,7 +429,7 @@ mod tests {
         // Only required ids present; optional fields default.
         let panes = parse_panes(r#"{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}]}}"#).unwrap();
         assert_eq!(panes.len(), 1);
-        assert_eq!(panes[0].display_title(), "w1:p1");
+        assert_eq!(panes[0].display_title(), "shell");
         assert!(!panes[0].focused);
     }
 

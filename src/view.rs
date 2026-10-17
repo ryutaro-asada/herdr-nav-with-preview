@@ -424,7 +424,7 @@ mod tests {
                 cwd: None,
             },
         ];
-        Tree::build(ws, tabs, panes)
+        Tree::build(ws, tabs, panes, None)
     }
 
     #[test]

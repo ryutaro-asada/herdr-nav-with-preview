@@ -81,7 +81,12 @@ fn selected_pane_id(view: &TreeView) -> Option<String> {
 
 /// Rebuild the workspace > tab > pane tree from the live herdr state.
 fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
-    Ok(Tree::build(api.workspaces()?, api.tabs()?, api.panes()?))
+    Ok(Tree::build(
+        api.workspaces()?,
+        api.tabs()?,
+        api.panes()?,
+        crate::herdr_client::own_pane_id().as_deref(),
+    ))
 }
 
 /// Color for an agent status, matching herdr's semantics.

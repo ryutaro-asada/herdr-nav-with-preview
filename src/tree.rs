@@ -42,9 +42,19 @@ pub struct Tree {
 impl Tree {
     /// Assemble a tree from the three flat lists. Panes are matched to tabs by
     /// `tab_id`; tabs are matched to workspaces by `workspace_id`. Entries are
-    /// sorted by their id for stable display order.
-    pub fn build(workspaces: Vec<Workspace>, tabs: Vec<Tab>, panes: Vec<Pane>) -> Self {
+    /// sorted by their id for stable display order. `exclude_pane` drops one
+    /// pane from the tree — used to hide the navigator's own overlay pane so it
+    /// doesn't show up as a stray `wN:pM` row.
+    pub fn build(
+        workspaces: Vec<Workspace>,
+        tabs: Vec<Tab>,
+        panes: Vec<Pane>,
+        exclude_pane: Option<&str>,
+    ) -> Self {
         let mut panes = panes;
+        if let Some(ex) = exclude_pane {
+            panes.retain(|p| p.pane_id != ex);
+        }
         panes.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
 
         let mut tabs = tabs;
@@ -188,6 +198,7 @@ mod tests {
                 pane("w1:p2", "w1:t2", "w1", "p2"),
                 pane("w2:p1", "w2:t1", "w2", "p3"),
             ],
+            None,
         );
 
         // Sorted by workspace_id: w1 then w2.
@@ -216,6 +227,7 @@ mod tests {
                 pane("w1:p2", "w1:t1", "w1", "second"),
                 pane("w1:p1", "w1:t1", "w1", "first"),
             ],
+            None,
         );
         let panes = &tree.workspaces[0].tabs[0].panes;
         assert_eq!(panes.len(), 2);
@@ -225,8 +237,24 @@ mod tests {
     }
 
     #[test]
+    fn exclude_pane_removes_own_overlay() {
+        let tree = Tree::build(
+            vec![ws("w1", "x", false)],
+            vec![tab("w1:t1", "w1", "a")],
+            vec![
+                pane("w1:p1", "w1:t1", "w1", "real"),
+                pane("w1:p9", "w1:t1", "w1", "overlay"),
+            ],
+            Some("w1:p9"),
+        );
+        let panes = &tree.workspaces[0].tabs[0].panes;
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].pane_id, "w1:p1");
+    }
+
+    #[test]
     fn empty_inputs() {
-        let tree = Tree::build(vec![], vec![], vec![]);
+        let tree = Tree::build(vec![], vec![], vec![], None);
         assert!(tree.is_empty());
         assert_eq!(tree.to_indented_text(), "");
     }
@@ -237,6 +265,7 @@ mod tests {
             vec![ws("w1", "x", false)],
             vec![tab("w1:t1", "w1", "a")],
             vec![],
+            None,
         );
         assert_eq!(tree.workspaces[0].tabs.len(), 1);
         assert!(tree.workspaces[0].tabs[0].panes.is_empty());
@@ -248,6 +277,7 @@ mod tests {
             vec![ws("w1", "proj", true)],
             vec![tab("w1:t1", "w1", "main")],
             vec![pane("w1:p1", "w1:t1", "w1", "shell")],
+            None,
         );
         let text = tree.to_indented_text();
         assert!(text.contains("w1 [proj] *"));
