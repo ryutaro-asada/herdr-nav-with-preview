@@ -19,7 +19,11 @@ use ratatui::{
     Terminal,
 };
 
-use crate::view::TreeView;
+use crate::herdr_client::HerdrApi;
+use crate::view::{RowKind, TreeView};
+
+/// Number of visible lines to request for the preview.
+const PREVIEW_LINES: u32 = 200;
 
 /// RAII guard: enters raw mode + alternate screen on construction and restores
 /// the terminal on drop. Installs a panic hook so a panic also restores.
@@ -29,7 +33,6 @@ pub struct TerminalGuard {
 
 impl TerminalGuard {
     pub fn new() -> Result<Self> {
-        // Ensure the terminal is restored even if we panic mid-draw.
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = disable_raw_mode();
@@ -58,20 +61,40 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Outcome of the event loop so the caller can act (e.g. focus a pane) after
-/// the terminal has been restored.
+/// Outcome of the event loop so the caller can act after the terminal has been
+/// restored.
 pub enum LoopOutcome {
     Quit,
 }
 
-/// Run the TUI event loop. For Task 5 this renders the tree and a placeholder
-/// preview, and handles navigation + quit. Preview and focus are layered on in
-/// later tasks.
-pub fn run(view: &mut TreeView) -> Result<LoopOutcome> {
+/// Resolve the pane id to preview for the currently selected row.
+fn selected_pane_id(view: &TreeView) -> Option<String> {
+    let row = view.selected_row()?;
+    row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
+}
+
+/// Fetch the preview text for a pane, returning an error string on failure so
+/// the UI can display it inline.
+fn fetch_preview(api: &dyn HerdrApi, pane_id: &str) -> String {
+    match api.read_pane(pane_id, PREVIEW_LINES) {
+        Ok(text) => text,
+        Err(e) => format!("(failed to read pane {pane_id}: {e})"),
+    }
+}
+
+/// Run the TUI event loop. The preview for the selected pane is fetched once on
+/// start and re-fetched whenever the selection moves to a different pane.
+pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     let mut guard = TerminalGuard::new()?;
 
+    let mut current_pane = selected_pane_id(view);
+    let mut preview = match &current_pane {
+        Some(id) => fetch_preview(api, id),
+        None => String::new(),
+    };
+
     loop {
-        guard.terminal().draw(|frame| draw(frame, view, "preview (coming soon)"))?;
+        guard.terminal().draw(|frame| draw(frame, view, &preview))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
@@ -87,15 +110,21 @@ pub fn run(view: &mut TreeView) -> Result<LoopOutcome> {
                 _ => {}
             }
         }
+
+        // Re-fetch only when the selected pane actually changed.
+        let new_pane = selected_pane_id(view);
+        if new_pane != current_pane {
+            preview = match &new_pane {
+                Some(id) => fetch_preview(api, id),
+                None => String::new(),
+            };
+            current_pane = new_pane;
+        }
     }
 }
 
 /// Draw the two-pane layout: tree on the left, preview on the right.
-pub fn draw(
-    frame: &mut ratatui::Frame,
-    view: &TreeView,
-    preview: &str,
-) {
+pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -140,18 +169,21 @@ pub fn draw(
     let title = view
         .selected_row()
         .map(|r| match r.kind {
-            crate::view::RowKind::Pane { pane_id, .. } => format!(" preview: {pane_id} "),
-            crate::view::RowKind::Tab { tab_id, .. } => format!(" preview: {tab_id} "),
-            crate::view::RowKind::Workspace { workspace_id } => {
-                format!(" preview: {workspace_id} ")
-            }
+            RowKind::Pane { pane_id, .. } => format!(" preview: {pane_id} "),
+            RowKind::Tab { tab_id, .. } => format!(" preview: {tab_id} "),
+            RowKind::Workspace { workspace_id } => format!(" preview: {workspace_id} "),
         })
         .unwrap_or_else(|| " preview ".to_string());
 
-    let preview_widget = Paragraph::new(preview).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title),
-    );
+    // Clip to the inner height so long output doesn't overflow the block.
+    let inner_height = chunks[1].height.saturating_sub(2) as usize;
+    let clipped: String = preview
+        .lines()
+        .take(inner_height.max(1))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let preview_widget =
+        Paragraph::new(clipped).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(preview_widget, chunks[1]);
 }

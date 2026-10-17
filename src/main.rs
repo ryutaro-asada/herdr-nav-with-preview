@@ -42,7 +42,7 @@ fn run_tui() -> Result<()> {
     let api = CliHerdr::new();
     let tree = Tree::build(api.workspaces()?, api.tabs()?, api.panes()?);
     let mut view = TreeView::new(tree);
-    match tui::run(&mut view)? {
+    match tui::run(&mut view, &api)? {
         LoopOutcome::Quit => {}
     }
     Ok(())
