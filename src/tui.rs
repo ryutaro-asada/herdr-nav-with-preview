@@ -79,14 +79,28 @@ fn selected_pane_id(view: &TreeView) -> Option<String> {
     row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
 }
 
-/// Rebuild the workspace > tab > pane tree from the live herdr state.
-fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
-    Ok(Tree::build(
-        api.workspaces()?,
-        api.tabs()?,
-        api.panes()?,
-        crate::herdr_client::own_pane_id().as_deref(),
-    ))
+/// Rebuild the tree after closing `closed_pane`, waiting briefly for herdr to
+/// actually drop the pane (and any now-empty tab/workspace) so the UI doesn't
+/// momentarily show a dead row. Gives up after a short budget and returns the
+/// latest tree regardless.
+fn rebuild_without(api: &dyn HerdrApi, closed_pane: &str) -> Result<Tree> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let panes = api.panes()?;
+        let still_present = panes.iter().any(|p| p.pane_id == closed_pane);
+        if !still_present || Instant::now() >= deadline {
+            let tabs = api.tabs()?;
+            let workspaces = api.workspaces()?;
+            return Ok(Tree::build(
+                workspaces,
+                tabs,
+                panes,
+                crate::herdr_client::own_pane_id().as_deref(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Color for an agent status, matching herdr's semantics.
@@ -320,9 +334,17 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 match api.close_pane(&pane_id) {
                                     Ok(()) => {
                                         status = Some(format!("closed {pane_id}"));
-                                        if let Ok(tree) = build_tree(api) {
+                                        // herdr removes the pane (and any now-empty
+                                        // tab/workspace) asynchronously. Rebuild
+                                        // once it's actually gone so the tree
+                                        // doesn't briefly show a dead row.
+                                        if let Ok(tree) = rebuild_without(api, &pane_id) {
                                             view.set_tree(tree);
                                         }
+                                        // The tree shrank; reset the scroll so the
+                                        // view can't be stuck scrolled past the
+                                        // new, shorter content.
+                                        scroll = 0;
                                     }
                                     Err(e) => {
                                         status = Some(format!("close failed: {e}"));

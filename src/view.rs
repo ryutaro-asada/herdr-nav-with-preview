@@ -541,6 +541,64 @@ mod tests {
     }
 
     #[test]
+    fn empty_tree_is_safe() {
+        // Reproduces "closed all panes" ending in an empty tree: no rows, no
+        // selected row, no panic from the read paths the TUI uses.
+        let view = TreeView::new(Tree::default());
+        assert!(view.rows().is_empty());
+        assert!(view.selected_row().is_none());
+        // scroll_offset must be a safe no-op on an empty list.
+        assert_eq!(scroll_offset(view.selected_index(), 0, 10, 0), 0);
+    }
+
+    #[test]
+    fn set_tree_shrink_reclamps_into_range() {
+        // Select the last row, then shrink the tree to a single workspace with
+        // one tab/pane. Selection must stay within the new, smaller row set.
+        let mut view = TreeView::new(sample_tree());
+        for _ in 0..4 {
+            view.move_down();
+        }
+        assert_eq!(view.selected_index(), 4);
+
+        let ws = vec![Workspace {
+            workspace_id: "w1".into(),
+            label: "proj".into(),
+            number: 1,
+            active_tab_id: None,
+            tab_count: 1,
+            pane_count: 1,
+            focused: true,
+            agent_status: None,
+        }];
+        let tabs = vec![Tab {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            label: "a".into(),
+            number: 1,
+            pane_count: 1,
+            focused: false,
+            agent_status: None,
+        }];
+        let panes = vec![Pane {
+            pane_id: "w1:p1".into(),
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            terminal_title_stripped: Some("only".into()),
+            terminal_title: None,
+            agent: None,
+            agent_status: None,
+            focused: false,
+            cwd: None,
+        }];
+        view.set_tree(Tree::build(ws, tabs, panes, None));
+        let len = view.rows().len();
+        assert_eq!(len, 3); // ws + tab + pane
+        assert!(view.selected_index() < len);
+        assert!(view.selected_row().is_some());
+    }
+
+    #[test]
     fn focus_plan_for_each_row_kind() {
         let view = TreeView::new(sample_tree());
         let rows = view.rows();
