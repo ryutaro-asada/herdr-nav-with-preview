@@ -3,6 +3,7 @@
 //! panic. Rendering and key handling delegate to `TreeView` (pure logic).
 
 use std::io::{self, Stdout};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -20,10 +21,11 @@ use ratatui::{
 };
 
 use crate::herdr_client::HerdrApi;
+use crate::poller::{PollRequest, PollState, Poller};
 use crate::view::{RowKind, TreeView};
 
-/// Number of visible lines to request for the preview.
-const PREVIEW_LINES: u32 = 200;
+/// How long to wait for a key event before checking for preview updates.
+const EVENT_POLL: Duration = Duration::from_millis(100);
 
 /// RAII guard: enters raw mode + alternate screen on construction and restores
 /// the terminal on drop. Installs a panic hook so a panic also restores.
@@ -73,52 +75,61 @@ fn selected_pane_id(view: &TreeView) -> Option<String> {
     row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
 }
 
-/// Fetch the preview text for a pane, returning an error string on failure so
-/// the UI can display it inline.
-fn fetch_preview(api: &dyn HerdrApi, pane_id: &str) -> String {
-    match api.read_pane(pane_id, PREVIEW_LINES) {
-        Ok(text) => text,
-        Err(e) => format!("(failed to read pane {pane_id}: {e})"),
-    }
-}
-
-/// Run the TUI event loop. The preview for the selected pane is fetched once on
-/// start and re-fetched whenever the selection moves to a different pane.
-pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
+/// Run the TUI event loop. A background `Poller` refreshes the selected pane's
+/// preview once per second; the loop polls for key events with a short timeout
+/// and drains preview updates each iteration, applying only current-generation
+/// results. The `Poller` is stopped and joined when it drops at scope exit.
+pub fn run(view: &mut TreeView, _api: &dyn HerdrApi) -> Result<LoopOutcome> {
     let mut guard = TerminalGuard::new()?;
 
+    let mut poll_state = PollState::new();
     let mut current_pane = selected_pane_id(view);
-    let mut preview = match &current_pane {
-        Some(id) => fetch_preview(api, id),
-        None => String::new(),
-    };
+    let generation = poll_state.generation();
+    let mut preview = String::new();
+
+    let poller = Poller::spawn(PollRequest {
+        generation,
+        pane_id: current_pane.clone(),
+    });
 
     loop {
         guard.terminal().draw(|frame| draw(frame, view, &preview))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
-                KeyCode::Down | KeyCode::Char('j') => view.move_down(),
-                KeyCode::Up | KeyCode::Char('k') => view.move_up(),
-                KeyCode::Right | KeyCode::Char('l') => view.expand(),
-                KeyCode::Left | KeyCode::Char('h') => view.collapse(),
-                KeyCode::Char(' ') => view.toggle(),
-                _ => {}
+        if event::poll(EVENT_POLL)? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
+                        KeyCode::Down | KeyCode::Char('j') => view.move_down(),
+                        KeyCode::Up | KeyCode::Char('k') => view.move_up(),
+                        KeyCode::Right | KeyCode::Char('l') => view.expand(),
+                        KeyCode::Left | KeyCode::Char('h') => view.collapse(),
+                        KeyCode::Char(' ') => view.toggle(),
+                        _ => {}
+                    }
+                }
             }
         }
 
-        // Re-fetch only when the selected pane actually changed.
+        // On selection change, bump the generation, clear the stale preview,
+        // and retarget the poller.
         let new_pane = selected_pane_id(view);
         if new_pane != current_pane {
-            preview = match &new_pane {
-                Some(id) => fetch_preview(api, id),
-                None => String::new(),
-            };
+            let gen = poll_state.bump();
+            preview.clear();
+            poller.set_request(PollRequest {
+                generation: gen,
+                pane_id: new_pane.clone(),
+            });
             current_pane = new_pane;
+        }
+
+        // Drain any pending updates; apply only the current generation.
+        while let Ok(update) = poller.updates.try_recv() {
+            if poll_state.accepts(update.generation) && Some(&update.pane_id) == current_pane.as_ref()
+            {
+                preview = update.text;
+            }
         }
     }
 }
