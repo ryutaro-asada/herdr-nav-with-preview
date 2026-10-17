@@ -13,12 +13,13 @@ name = "herdr-nav-preview"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "=0.28.1"
+ratatui = "=0.29.0"
 crossterm = "=0.28.1"
 serde = { version = "=1.0.210", features = ["derive"] }
 serde_json = "=1.0.128"
 anyhow = "=1.0.89"
 unicode-width = "=0.1.14"
+ansi-to-tui = "=7.0.0"
 
 [profile.release]
 strip = true

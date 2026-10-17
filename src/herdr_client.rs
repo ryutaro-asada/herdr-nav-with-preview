@@ -195,7 +195,10 @@ pub trait HerdrApi {
     fn workspaces(&self) -> Result<Vec<Workspace>>;
     fn tabs(&self) -> Result<Vec<Tab>>;
     fn panes(&self) -> Result<Vec<Pane>>;
+    #[allow(dead_code)]
     fn read_pane(&self, pane_id: &str, lines: u32) -> Result<String>;
+    /// Like `read_pane` but preserves ANSI SGR escapes for colored rendering.
+    fn read_pane_ansi(&self, pane_id: &str, lines: u32) -> Result<String>;
     fn focus_workspace(&self, workspace_id: &str) -> Result<()>;
     fn focus_tab(&self, tab_id: &str) -> Result<()>;
     fn focus_agent(&self, target: &str) -> Result<()>;
@@ -269,6 +272,13 @@ impl HerdrApi for CliHerdr {
         let lines = lines.to_string();
         self.run(&[
             "pane", "read", pane_id, "--source", "visible", "--lines", &lines,
+        ])
+    }
+
+    fn read_pane_ansi(&self, pane_id: &str, lines: u32) -> Result<String> {
+        let lines = lines.to_string();
+        self.run(&[
+            "pane", "read", pane_id, "--source", "visible", "--lines", &lines, "--ansi",
         ])
     }
 
@@ -387,6 +397,9 @@ mod tests {
             Ok(vec![])
         }
         fn read_pane(&self, _pane_id: &str, _lines: u32) -> Result<String> {
+            Ok(String::new())
+        }
+        fn read_pane_ansi(&self, _pane_id: &str, _lines: u32) -> Result<String> {
             Ok(String::new())
         }
         fn focus_workspace(&self, workspace_id: &str) -> Result<()> {

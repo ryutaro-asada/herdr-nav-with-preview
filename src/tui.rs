@@ -6,6 +6,7 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use ansi_to_tui::IntoText;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -15,7 +16,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
@@ -257,8 +258,15 @@ pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str, status: 
         .collect::<Vec<_>>()
         .join("\n");
 
-    let preview_widget =
-        Paragraph::new(clipped).block(Block::default().borders(Borders::ALL).title(title));
+    // Render the preview with its original ANSI colors. Fall back to plain text
+    // if the bytes can't be parsed as ANSI.
+    let preview_text: Text = clipped
+        .as_bytes()
+        .into_text()
+        .unwrap_or_else(|_| Text::from(clipped.clone()));
+
+    let preview_widget = Paragraph::new(preview_text)
+        .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(preview_widget, chunks[1]);
 
     // Bottom help/status bar.

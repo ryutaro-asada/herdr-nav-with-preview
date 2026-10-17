@@ -102,7 +102,7 @@ impl Poller {
                     // updates).
                     let _ = last_sent_pane;
                     let _ = last_gen;
-                    let text = match api.read_pane(&pane_id, PREVIEW_LINES) {
+                    let text = match api.read_pane_ansi(&pane_id, PREVIEW_LINES) {
                         Ok(t) => t,
                         Err(e) => format!("(failed to read pane {pane_id}: {e})"),
                     };
