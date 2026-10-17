@@ -379,7 +379,6 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         view.select_for_launch(Some(&new_id), None, None);
                                         scroll = 0;
                                         current_pane = None;
-                                        guard.terminal().clear().ok();
                                     }
                                     Err(e) => {
                                         status = Some(format!("create failed: {e}"));
@@ -475,7 +474,10 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                                 view.set_tree(tree);
                                             }
                                             current_pane = None;
-                                            guard.terminal().clear().ok();
+                                            // No full clear() here: adding a tab
+                                            // doesn't disturb our popup, and a
+                                            // clear causes a visible blank flash
+                                            // that looks like the nav closed.
                                         }
                                         Err(e) => status = Some(format!("add tab failed: {e}")),
                                     },
