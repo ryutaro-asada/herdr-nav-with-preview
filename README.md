@@ -28,6 +28,34 @@ pane on the right. Press `Enter` to jump straight to the pane.
 herdr plugin install ryutaro-asada/herdr-nav-with-preview
 ```
 
+## Local development
+
+Link your working copy, build the binary, then open the overlay:
+
+```sh
+cargo build --release
+herdr plugin link "$(pwd)"
+herdr plugin pane open --plugin ryutaroasada.nav-with-preview --entrypoint nav
+```
+
+`herdr plugin link` does not run build commands, so build the release binary
+yourself first. `herdr plugin install` runs the `[[build]]` step for you.
+
+## Keybinding
+
+herdr's manifest keybindings target plugin actions, but the overlay here is a
+pane entrypoint, so bind a key in your own `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+W"
+type = "pane"
+command = ["herdr", "plugin", "pane", "open", "--plugin", "ryutaroasada.nav-with-preview", "--entrypoint", "nav"]
+```
+
+`prefix+w` (lowercase) is herdr's built-in workspace navigator, so this plugin
+uses `prefix+W` (shift) to avoid clobbering it. Pick any free chord you like.
+
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE).
