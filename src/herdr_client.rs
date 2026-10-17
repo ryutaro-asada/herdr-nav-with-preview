@@ -206,6 +206,28 @@ pub fn parse_panes(json: &str) -> Result<Vec<Pane>> {
     Ok(env.result.panes)
 }
 
+#[derive(Debug, Deserialize)]
+struct CreatedWorkspace {
+    workspace_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkspaceResult {
+    workspace: CreatedWorkspace,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkspaceEnvelope {
+    result: CreateWorkspaceResult,
+}
+
+/// Parse the workspace id from `workspace create` output.
+pub fn parse_created_workspace_id(json: &str) -> Result<String> {
+    let env: CreateWorkspaceEnvelope =
+        serde_json::from_str(json).context("failed to parse `workspace create` JSON")?;
+    Ok(env.result.workspace.workspace_id)
+}
+
 // --- CLI invocation ---
 
 /// A plan describing how to jump focus to a target, as an ordered list of
@@ -266,6 +288,8 @@ pub trait HerdrApi {
     fn focus_agent(&self, target: &str) -> Result<()>;
     /// Close (kill) a pane by id.
     fn close_pane(&self, pane_id: &str) -> Result<()>;
+    /// Create a new workspace with the given label; returns its workspace id.
+    fn create_workspace(&self, label: &str) -> Result<String>;
 
     /// Execute a focus plan. The workspace and tab steps are required (an error
     /// propagates); the pane step is best-effort and its error is swallowed.
@@ -360,6 +384,11 @@ impl HerdrApi for CliHerdr {
 
     fn close_pane(&self, pane_id: &str) -> Result<()> {
         self.run(&["pane", "close", pane_id]).map(|_| ())
+    }
+
+    fn create_workspace(&self, label: &str) -> Result<String> {
+        let out = self.run(&["workspace", "create", "--label", label, "--no-focus"])?;
+        parse_created_workspace_id(&out)
     }
 }
 
@@ -490,6 +519,10 @@ mod tests {
             self.calls.borrow_mut().push(format!("close:{pane_id}"));
             Ok(())
         }
+        fn create_workspace(&self, label: &str) -> Result<String> {
+            self.calls.borrow_mut().push(format!("create:{label}"));
+            Ok("wNEW".to_string())
+        }
     }
 
     #[test]
@@ -527,6 +560,12 @@ mod tests {
         let api = FakeApi::default();
         api.close_pane("w1:p1").unwrap();
         assert_eq!(*api.calls.borrow(), vec!["close:w1:p1"]);
+    }
+
+    #[test]
+    fn parses_created_workspace_id() {
+        let json = r#"{"id":"cli:workspace:create","result":{"type":"workspace_info","workspace":{"workspace_id":"wJ","label":"x","number":10},"root_pane":{"pane_id":"wJ:p1"}}}"#;
+        assert_eq!(parse_created_workspace_id(json).unwrap(), "wJ");
     }
 
     #[test]

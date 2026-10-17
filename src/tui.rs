@@ -79,6 +79,16 @@ fn selected_pane_id(view: &TreeView) -> Option<String> {
     row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
 }
 
+/// Rebuild the workspace > tab > pane tree from the live herdr state.
+fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
+    Ok(Tree::build(
+        api.workspaces()?,
+        api.tabs()?,
+        api.panes()?,
+        crate::herdr_client::own_pane_id().as_deref(),
+    ))
+}
+
 /// Rebuild the tree after closing `closed_pane`, waiting briefly for herdr to
 /// actually drop the pane (and any now-empty tab/workspace) so the UI doesn't
 /// momentarily show a dead row. Gives up after a short budget and returns the
@@ -290,6 +300,9 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     // The tab the overlay itself lives in. Closing panes in this tab would
     // take the navigator down with it, so we refuse to close them.
     let own_tab = crate::herdr_client::own_tab_id();
+    // When `Some`, we're in the "new workspace name" text-entry mode and this
+    // holds the current input buffer.
+    let mut input_buf: Option<String> = None;
 
     let poller = Poller::spawn(PollRequest {
         generation,
@@ -307,6 +320,12 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             let rows = view.rows();
             let selected = view.selected_index();
             let title = preview_title(&rows, selected);
+            // In text-entry mode, show the prompt (with a cursor) in the bar;
+            // otherwise show the current status/help.
+            let bar_text = input_buf
+                .as_ref()
+                .map(|b| format!("new workspace name: {b}\u{2588}"));
+            let bar = bar_text.as_deref().or(status.as_deref());
             let mut scroll_ref = scroll;
             guard.terminal().draw(|frame| {
                 draw(
@@ -315,7 +334,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                     selected,
                     &preview_text,
                     &title,
-                    status.as_deref(),
+                    bar,
                     &mut scroll_ref,
                 )
             })?;
@@ -328,10 +347,51 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                 if key.kind == KeyEventKind::Press {
                     dirty = true;
 
-                    // When a close is pending, intercept keys as a yes/no
-                    // confirmation (tmux style): y or Enter confirms, anything
-                    // else cancels.
-                    if let Some(pane_id) = confirm_close.clone() {
+                    // Text-entry mode for naming a new workspace takes priority.
+                    if let Some(buf) = input_buf.as_mut() {
+                        match key.code {
+                            KeyCode::Enter => {
+                                let label = buf.trim().to_string();
+                                // Buffer is pre-filled with the default number,
+                                // so an empty label shouldn't normally happen,
+                                // but guard anyway.
+                                let label = if label.is_empty() {
+                                    view.tree().next_workspace_number().to_string()
+                                } else {
+                                    label
+                                };
+                                match api.create_workspace(&label) {
+                                    Ok(new_id) => {
+                                        status = Some(format!("created workspace {label}"));
+                                        if let Ok(tree) = build_tree(api) {
+                                            view.set_tree(tree);
+                                        }
+                                        // Move selection to the new workspace.
+                                        view.select_for_launch(Some(&new_id), None, None);
+                                        scroll = 0;
+                                    }
+                                    Err(e) => {
+                                        status = Some(format!("create failed: {e}"));
+                                    }
+                                }
+                                input_buf = None;
+                            }
+                            KeyCode::Esc => {
+                                status = None;
+                                input_buf = None;
+                            }
+                            KeyCode::Backspace => {
+                                buf.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                buf.push(c);
+                            }
+                            _ => {}
+                        }
+                    } else if let Some(pane_id) = confirm_close.clone() {
+                        // When a close is pending, intercept keys as a yes/no
+                        // confirmation (tmux style): y or Enter confirms,
+                        // anything else cancels.
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                                 match api.close_pane(&pane_id) {
@@ -362,6 +422,13 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                     } else {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
+                            KeyCode::Char('n') => {
+                                // Start naming a new workspace; default to the
+                                // next workspace number so Enter alone works.
+                                let default = view.tree().next_workspace_number().to_string();
+                                status = None;
+                                input_buf = Some(default);
+                            }
                             KeyCode::Enter => {
                                 if let Some(row) = view.selected_row() {
                                     let plan = row.focus_plan(view.tree());
@@ -532,7 +599,7 @@ pub fn draw(
                 .add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
-            " ↑/↓ move   ←/→ fold   ⏎ jump   x close   q quit ",
+            " ↑/↓ move   ←/→ fold   ⏎ jump   n new   x close   q quit ",
             Style::default().fg(Color::DarkGray),
         )),
     };

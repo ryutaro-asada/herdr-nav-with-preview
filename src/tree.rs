@@ -113,6 +113,18 @@ impl Tree {
         self.workspaces.is_empty()
     }
 
+    /// The default label for a new workspace: one past the highest existing
+    /// workspace number (falling back to count + 1).
+    pub fn next_workspace_number(&self) -> u32 {
+        let max = self
+            .workspaces
+            .iter()
+            .map(|w| w.number)
+            .max()
+            .unwrap_or(0);
+        max.max(self.workspaces.len() as u32) + 1
+    }
+
     /// Render the tree as indented text. Used by the `--dump-tree` debug command
     /// and handy for assertions.
     pub fn to_indented_text(&self) -> String {
@@ -257,6 +269,18 @@ mod tests {
         let tree = Tree::build(vec![], vec![], vec![], None);
         assert!(tree.is_empty());
         assert_eq!(tree.to_indented_text(), "");
+        // Default number for the first workspace is 1.
+        assert_eq!(tree.next_workspace_number(), 1);
+    }
+
+    #[test]
+    fn next_workspace_number_is_one_past_max() {
+        let mut w1 = ws("w1", "a", false);
+        w1.number = 3;
+        let mut w2 = ws("w2", "b", false);
+        w2.number = 7;
+        let tree = Tree::build(vec![w1, w2], vec![], vec![], None);
+        assert_eq!(tree.next_workspace_number(), 8);
     }
 
     #[test]
