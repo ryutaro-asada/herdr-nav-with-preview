@@ -160,11 +160,86 @@ pub fn scroll_offset(selected: usize, total: usize, height: usize, prev: usize) 
     offset.min(max_offset)
 }
 
-pub struct TreeView {
-    tree: Tree,
+/// Does a row match the search query? Case-insensitive substring match against
+/// the display name, the agent kind, and the kind's ids (so you can search by
+/// workspace/tab/pane id too). Empty query matches everything.
+pub fn row_matches_query(row: &Row, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    let mut hay = row.name.to_lowercase();
+    if let Some(a) = &row.agent {
+        hay.push(' ');
+        hay.push_str(&a.to_lowercase());
+    }
+    match &row.kind {
+        RowKind::Workspace { workspace_id } => {
+            hay.push(' ');
+            hay.push_str(&workspace_id.to_lowercase());
+        }
+        RowKind::Tab {
+            workspace_id,
+            tab_id,
+        } => {
+            hay.push(' ');
+            hay.push_str(&workspace_id.to_lowercase());
+            hay.push(' ');
+            hay.push_str(&tab_id.to_lowercase());
+        }
+        RowKind::Pane {
+            workspace_id,
+            tab_id,
+            pane_id,
+        } => {
+            hay.push(' ');
+            hay.push_str(&workspace_id.to_lowercase());
+            hay.push(' ');
+            hay.push_str(&tab_id.to_lowercase());
+            hay.push(' ');
+            hay.push_str(&pane_id.to_lowercase());
+        }
+    }
+    hay.contains(&q)
+}
+
+/// Filter a flattened (pre-order, depth 0/1/2) row list to those matching
+/// `query`, keeping the ancestors needed to reach each match. A workspace or
+/// tab is kept if it matches directly or has a kept descendant.
+pub fn filter_rows(all: &[Row], query: &str) -> Vec<Row> {
+    if query.trim().is_empty() {
+        return all.to_vec();
+    }
+    let n = all.len();
+    let mut keep = vec![false; n];
+    for (i, row) in all.iter().enumerate() {
+        if row_matches_query(row, query) {
+            keep[i] = true;
+            // Keep ancestors: the nearest preceding rows with smaller depth.
+            let mut need = row.depth;
+            let mut j = i;
+            while need > 0 && j > 0 {
+                j -= 1;
+                if all[j].depth < need {
+                    keep[j] = true;
+                    need = all[j].depth;
+                }
+            }
+        }
+    }
+    all.iter()
+        .zip(keep)
+        .filter_map(|(r, k)| if k { Some(r.clone()) } else { None })
+        .collect()
+}
+
+pub struct TreeView {    tree: Tree,
     /// Keys of nodes that are collapsed. Default (absent) == expanded.
     collapsed: HashSet<String>,
     selected: usize,
+    /// Incremental search query. When non-empty, `rows()` shows only rows that
+    /// match (plus their ancestors), with all nodes expanded.
+    query: String,
 }
 
 impl TreeView {
@@ -173,6 +248,44 @@ impl TreeView {
             tree,
             collapsed: HashSet::new(),
             selected: 0,
+            query: String::new(),
+        }
+    }
+
+    /// The current search query.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Whether a search filter is currently active.
+    pub fn is_searching(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    /// Append a character to the search query and clamp the selection.
+    pub fn push_query_char(&mut self, c: char) {
+        self.query.push(c);
+        self.clamp_selection();
+    }
+
+    /// Remove the last character from the search query and clamp the selection.
+    pub fn pop_query_char(&mut self) {
+        self.query.pop();
+        self.clamp_selection();
+    }
+
+    /// Clear the search query entirely.
+    pub fn clear_query(&mut self) {
+        self.query.clear();
+        self.clamp_selection();
+    }
+
+    fn clamp_selection(&mut self) {
+        let len = self.rows().len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
         }
     }
 
@@ -256,13 +369,26 @@ impl TreeView {
         self.collapsed.contains(key)
     }
 
-    /// Compute the currently visible rows given collapse state.
+    /// Compute the currently visible rows. With no search query, honors
+    /// collapse state. With a query, shows every row that matches (plus the
+    /// ancestors needed to reach it), fully expanded.
     pub fn rows(&self) -> Vec<Row> {
+        if self.query.is_empty() {
+            return self.all_rows(true);
+        }
+        let all = self.all_rows(false);
+        filter_rows(&all, &self.query)
+    }
+
+    /// Build the full flattened row list. When `honor_collapse` is true,
+    /// collapsed nodes hide their descendants; when false, everything is
+    /// expanded (used while searching).
+    fn all_rows(&self, honor_collapse: bool) -> Vec<Row> {
         let mut rows = Vec::new();
         let ws_count = self.tree.workspaces.len();
         for (wi, w) in self.tree.workspaces.iter().enumerate() {
             let wkey = ws_key(&w.workspace_id);
-            let w_collapsed = self.is_collapsed(&wkey);
+            let w_collapsed = honor_collapse && self.is_collapsed(&wkey);
             // Workspace name: "number  label" with a clean fallback.
             let label = if w.label.trim().is_empty() {
                 w.workspace_id.clone()
@@ -295,7 +421,7 @@ impl TreeView {
             let tab_count = w.tabs.len();
             for (ti, t) in w.tabs.iter().enumerate() {
                 let tkey = tab_key(&t.tab_id);
-                let t_collapsed = self.is_collapsed(&tkey);
+                let t_collapsed = honor_collapse && self.is_collapsed(&tkey);
                 let tlabel = t.label.trim();
                 // Tab labels are often just the tab number; avoid showing
                 // "2  2". Show "#N" when the label is empty or equals the
@@ -717,5 +843,92 @@ mod tests {
         v.move_down();
         v.select_for_launch(Some("zzz"), Some("zzz"), Some("zzz"));
         assert_eq!(v.selected_index(), 1);
+    }
+
+    #[test]
+    fn empty_query_shows_all_rows() {
+        let view = TreeView::new(sample_tree());
+        assert!(!view.is_searching());
+        assert_eq!(view.rows().len(), 5); // ws + 2 tabs + 2 panes
+    }
+
+    #[test]
+    fn query_filters_to_matches_plus_ancestors() {
+        // Search "claude": only w1:p2 (agent claude) matches. Its ancestors
+        // (w1 workspace, w1:t2 tab) are kept so it's reachable.
+        let mut view = TreeView::new(sample_tree());
+        for c in "claude".chars() {
+            view.push_query_char(c);
+        }
+        assert!(view.is_searching());
+        let rows = view.rows();
+        // workspace w1, tab w1:t2, pane w1:p2 = 3 rows (w1:t1 and w1:p1 dropped).
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(rows[0].kind, RowKind::Workspace { .. }));
+        assert!(matches!(&rows[1].kind, RowKind::Tab { tab_id, .. } if tab_id == "w1:t2"));
+        assert!(matches!(&rows[2].kind, RowKind::Pane { pane_id, .. } if pane_id == "w1:p2"));
+    }
+
+    #[test]
+    fn query_matches_pane_title() {
+        let mut view = TreeView::new(sample_tree());
+        for c in "shell-a".chars() {
+            view.push_query_char(c);
+        }
+        let rows = view.rows();
+        // Only w1:p1 ("shell-a") + ancestors w1, w1:t1 = 3.
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(&rows[2].kind, RowKind::Pane { pane_id, .. } if pane_id == "w1:p1"));
+    }
+
+    #[test]
+    fn query_matches_workspace_label() {
+        let mut view = TreeView::new(sample_tree());
+        for c in "proj".chars() {
+            view.push_query_char(c);
+        }
+        // Workspace matches -> workspace kept; descendants are not auto-kept
+        // (only ancestors of matches are), so just the workspace row shows.
+        let rows = view.rows();
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0].kind, RowKind::Workspace { .. }));
+    }
+
+    #[test]
+    fn query_is_case_insensitive_and_clears() {
+        let mut view = TreeView::new(sample_tree());
+        for c in "CLAUDE".chars() {
+            view.push_query_char(c);
+        }
+        assert_eq!(view.rows().len(), 3);
+        view.pop_query_char(); // "CLAUD"
+        assert_eq!(view.rows().len(), 3);
+        view.clear_query();
+        assert!(!view.is_searching());
+        assert_eq!(view.rows().len(), 5);
+    }
+
+    #[test]
+    fn no_match_yields_empty_and_selection_clamps() {
+        let mut view = TreeView::new(sample_tree());
+        view.move_down();
+        view.move_down(); // selected index 2
+        for c in "zzzzz".chars() {
+            view.push_query_char(c);
+        }
+        assert_eq!(view.rows().len(), 0);
+        assert_eq!(view.selected_index(), 0); // clamped
+        assert!(view.selected_row().is_none());
+    }
+
+    #[test]
+    fn row_matches_query_direct() {
+        let view = TreeView::new(sample_tree());
+        let rows = view.rows();
+        let pane_claude = rows.iter().find(|r| matches!(&r.kind, RowKind::Pane { pane_id, .. } if pane_id == "w1:p2")).unwrap();
+        assert!(row_matches_query(pane_claude, "claude"));
+        assert!(row_matches_query(pane_claude, "w1:p2")); // id match
+        assert!(!row_matches_query(pane_claude, "nope"));
+        assert!(row_matches_query(pane_claude, "")); // empty matches
     }
 }
