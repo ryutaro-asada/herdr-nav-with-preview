@@ -249,6 +249,8 @@ pub trait HerdrApi {
     fn focus_workspace(&self, workspace_id: &str) -> Result<()>;
     fn focus_tab(&self, tab_id: &str) -> Result<()>;
     fn focus_agent(&self, target: &str) -> Result<()>;
+    /// Close (kill) a pane by id.
+    fn close_pane(&self, pane_id: &str) -> Result<()>;
 
     /// Execute a focus plan. The workspace and tab steps are required (an error
     /// propagates); the pane step is best-effort and its error is swallowed.
@@ -339,6 +341,10 @@ impl HerdrApi for CliHerdr {
 
     fn focus_agent(&self, target: &str) -> Result<()> {
         self.run(&["agent", "focus", target]).map(|_| ())
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        self.run(&["pane", "close", pane_id]).map(|_| ())
     }
 }
 
@@ -465,6 +471,10 @@ mod tests {
                 Ok(())
             }
         }
+        fn close_pane(&self, pane_id: &str) -> Result<()> {
+            self.calls.borrow_mut().push(format!("close:{pane_id}"));
+            Ok(())
+        }
     }
 
     #[test]
@@ -498,8 +508,14 @@ mod tests {
     }
 
     #[test]
+    fn close_pane_is_recorded() {
+        let api = FakeApi::default();
+        api.close_pane("w1:p1").unwrap();
+        assert_eq!(*api.calls.borrow(), vec!["close:w1:p1"]);
+    }
+
+    #[test]
     fn launch_context_parses_focused_pane() {
-        // Real shape from HERDR_PLUGIN_CONTEXT_JSON (0.7.5).
         let json = r#"{"workspace_id":"wC","workspace_label":"proj","tab_id":"wC:t1","focused_pane_id":"wC:p1","focused_pane_agent":"kiro","invocation_source":"api"}"#;
         let ctx = LaunchContext::from_json(json).unwrap();
         assert_eq!(ctx.workspace_id.as_deref(), Some("wC"));

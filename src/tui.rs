@@ -22,6 +22,7 @@ use ratatui::{
 
 use crate::herdr_client::HerdrApi;
 use crate::poller::{PollRequest, PollState, Poller};
+use crate::tree::Tree;
 use crate::view::{RowKind, TreeView};
 
 /// How long to wait for a key event before checking for preview updates.
@@ -76,6 +77,11 @@ pub enum LoopOutcome {
 fn selected_pane_id(view: &TreeView) -> Option<String> {
     let row = view.selected_row()?;
     row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
+}
+
+/// Rebuild the workspace > tab > pane tree from the live herdr state.
+fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
+    Ok(Tree::build(api.workspaces()?, api.tabs()?, api.panes()?))
 }
 
 /// Color for an agent status, matching herdr's semantics.
@@ -244,6 +250,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     // stores and renders it.
     let mut preview_text: Text<'static> = Text::default();
     let mut status: Option<String> = None;
+    // Pane id armed for close; set when `x` is first pressed on a pane.
+    let mut confirm_close: Option<String> = None;
 
     let poller = Poller::spawn(PollRequest {
         generation,
@@ -287,8 +295,46 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                         KeyCode::Right | KeyCode::Char('l') => view.expand(),
                         KeyCode::Left | KeyCode::Char('h') => view.collapse(),
                         KeyCode::Char(' ') => view.toggle(),
+                        KeyCode::Char('x') => {
+                            // Close the selected pane. Destructive, so require a
+                            // confirming second `x` on the same pane.
+                            match view.selected_row().map(|r| r.kind) {
+                                Some(RowKind::Pane { pane_id, .. }) => {
+                                    if confirm_close.as_deref() == Some(pane_id.as_str()) {
+                                        match api.close_pane(&pane_id) {
+                                            Ok(()) => {
+                                                status = Some(format!("closed {pane_id}"));
+                                                // Rebuild the tree so the row disappears.
+                                                if let Ok(tree) = build_tree(api) {
+                                                    view.set_tree(tree);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                status = Some(format!("close failed: {e}"));
+                                            }
+                                        }
+                                        confirm_close = None;
+                                    } else {
+                                        confirm_close = Some(pane_id);
+                                        status =
+                                            Some("press x again to close this pane".to_string());
+                                    }
+                                }
+                                _ => {
+                                    status = Some("select a pane to close".to_string());
+                                    confirm_close = None;
+                                }
+                            }
+                        }
                         _ => {
                             dirty = false;
+                        }
+                    }
+                    // Any key other than a second `x` cancels a pending close.
+                    if !matches!(key.code, KeyCode::Char('x')) {
+                        if confirm_close.is_some() {
+                            confirm_close = None;
+                            status = None;
                         }
                     }
                 }
@@ -412,7 +458,7 @@ pub fn draw(
                 .add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
-            " ↑/↓ move   ←/→ fold   space toggle   ⏎ jump   q quit ",
+            " ↑/↓ move   ←/→ fold   ⏎ jump   x close   q quit ",
             Style::default().fg(Color::DarkGray),
         )),
     };
