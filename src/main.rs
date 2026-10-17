@@ -1,8 +1,10 @@
 mod herdr_client;
+mod tree;
 
 use anyhow::Result;
 
 use herdr_client::{CliHerdr, HerdrApi};
+use tree::Tree;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -21,6 +23,11 @@ fn main() -> Result<()> {
                     if w.focused { " *focused" } else { "" }
                 );
             }
+        }
+        Some("--dump-tree") => {
+            let api = CliHerdr::new();
+            let tree = Tree::build(api.workspaces()?, api.tabs()?, api.panes()?);
+            print!("{}", tree.to_indented_text());
         }
         _ => {
             println!("herdr-nav-preview: hello");
