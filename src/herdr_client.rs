@@ -1,0 +1,309 @@
+//! Thin client around the `herdr` CLI.
+//!
+//! herdr injects `HERDR_BIN_PATH` into plugin processes so they can call back
+//! into the running server portably. We shell out to that binary and parse the
+//! JSON it prints on stdout.
+//!
+//! Verified against herdr 0.7.5:
+//! - `herdr workspace list`  -> `{ "result": { "workspaces": [...] } }`
+//! - `herdr tab list`        -> `{ "result": { "tabs": [...] } }`
+//! - `herdr pane list`       -> `{ "result": { "panes": [...] } }`
+//! - `herdr pane read <id> --source visible [--lines N]` -> plain text
+//!
+//! The list commands emit JSON by default; passing `--json` is rejected on
+//! 0.7.x, so we must not add it.
+
+use std::process::Command;
+
+use anyhow::{anyhow, Context, Result};
+use serde::Deserialize;
+
+/// Resolve the herdr binary to call. Prefer the injected `HERDR_BIN_PATH`,
+/// falling back to `herdr` on `PATH` for local development.
+pub fn herdr_bin() -> String {
+    std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
+}
+
+/// A herdr workspace (top-level project container).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Workspace {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub active_tab_id: Option<String>,
+    #[serde(default)]
+    pub tab_count: u32,
+    #[serde(default)]
+    pub pane_count: u32,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub agent_status: Option<String>,
+}
+
+/// A tab (layout) inside a workspace.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Tab {
+    pub tab_id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub pane_count: u32,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub agent_status: Option<String>,
+}
+
+/// A pane (a real terminal) inside a tab.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Pane {
+    pub pane_id: String,
+    pub tab_id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub terminal_title_stripped: Option<String>,
+    #[serde(default)]
+    pub terminal_title: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub agent_status: Option<String>,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+impl Pane {
+    /// Human-friendly one-line label for the pane, preferring a stripped
+    /// terminal title, then the raw title, then the pane id.
+    pub fn display_title(&self) -> String {
+        self.terminal_title_stripped
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(self.terminal_title.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.pane_id.clone())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListResult {
+    #[serde(default)]
+    workspaces: Vec<Workspace>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListEnvelope {
+    result: WorkspaceListResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabListResult {
+    #[serde(default)]
+    tabs: Vec<Tab>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabListEnvelope {
+    result: TabListResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneListResult {
+    #[serde(default)]
+    panes: Vec<Pane>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneListEnvelope {
+    result: PaneListResult,
+}
+
+// --- JSON parsing (pure functions, unit-tested against real fixtures) ---
+
+pub fn parse_workspaces(json: &str) -> Result<Vec<Workspace>> {
+    let env: WorkspaceListEnvelope =
+        serde_json::from_str(json).context("failed to parse `workspace list` JSON")?;
+    Ok(env.result.workspaces)
+}
+
+pub fn parse_tabs(json: &str) -> Result<Vec<Tab>> {
+    let env: TabListEnvelope =
+        serde_json::from_str(json).context("failed to parse `tab list` JSON")?;
+    Ok(env.result.tabs)
+}
+
+pub fn parse_panes(json: &str) -> Result<Vec<Pane>> {
+    let env: PaneListEnvelope =
+        serde_json::from_str(json).context("failed to parse `pane list` JSON")?;
+    Ok(env.result.panes)
+}
+
+// --- CLI invocation ---
+
+/// Trait so the TUI can depend on an abstraction and tests can inject fakes.
+pub trait HerdrApi {
+    fn workspaces(&self) -> Result<Vec<Workspace>>;
+    fn tabs(&self) -> Result<Vec<Tab>>;
+    fn panes(&self) -> Result<Vec<Pane>>;
+    fn read_pane(&self, pane_id: &str, lines: u32) -> Result<String>;
+    fn focus_workspace(&self, workspace_id: &str) -> Result<()>;
+    fn focus_tab(&self, tab_id: &str) -> Result<()>;
+    fn focus_agent(&self, target: &str) -> Result<()>;
+}
+
+/// Real implementation that shells out to the herdr binary.
+pub struct CliHerdr {
+    bin: String,
+}
+
+impl CliHerdr {
+    pub fn new() -> Self {
+        Self { bin: herdr_bin() }
+    }
+
+    fn run(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new(&self.bin)
+            .args(args)
+            .output()
+            .with_context(|| format!("failed to run `{} {}`", self.bin, args.join(" ")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!(
+                "`{} {}` exited with {}: {}",
+                self.bin,
+                args.join(" "),
+                output.status,
+                stderr.trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+impl Default for CliHerdr {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HerdrApi for CliHerdr {
+    fn workspaces(&self) -> Result<Vec<Workspace>> {
+        parse_workspaces(&self.run(&["workspace", "list"])?)
+    }
+
+    fn tabs(&self) -> Result<Vec<Tab>> {
+        parse_tabs(&self.run(&["tab", "list"])?)
+    }
+
+    fn panes(&self) -> Result<Vec<Pane>> {
+        parse_panes(&self.run(&["pane", "list"])?)
+    }
+
+    fn read_pane(&self, pane_id: &str, lines: u32) -> Result<String> {
+        let lines = lines.to_string();
+        self.run(&[
+            "pane", "read", pane_id, "--source", "visible", "--lines", &lines,
+        ])
+    }
+
+    fn focus_workspace(&self, workspace_id: &str) -> Result<()> {
+        self.run(&["workspace", "focus", workspace_id]).map(|_| ())
+    }
+
+    fn focus_tab(&self, tab_id: &str) -> Result<()> {
+        self.run(&["tab", "focus", tab_id]).map(|_| ())
+    }
+
+    fn focus_agent(&self, target: &str) -> Result<()> {
+        self.run(&["agent", "focus", target]).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Real output captured from herdr 0.7.5 (trimmed to two entries).
+    const WORKSPACE_JSON: &str = r#"
+    {"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[
+      {"active_tab_id":"w4:t1","agent_status":"unknown","focused":false,"label":"aaaaa","number":1,"pane_count":1,"tab_count":1,"workspace_id":"w4"},
+      {"active_tab_id":"wC:t1","agent_status":"working","focused":true,"label":"herder-nav-with-preview","number":9,"pane_count":1,"tab_count":1,"workspace_id":"wC"}
+    ]}}"#;
+
+    const TAB_JSON: &str = r#"
+    {"id":"cli:tab:list","result":{"tabs":[
+      {"agent_status":"unknown","focused":false,"label":"1","number":1,"pane_count":1,"tab_id":"w4:t1","workspace_id":"w4"},
+      {"agent_status":"working","focused":true,"label":"1","number":1,"pane_count":1,"tab_id":"wC:t1","workspace_id":"wC"}
+    ],"type":"tab_list"}}"#;
+
+    const PANE_JSON: &str = r#"
+    {"id":"cli:pane:list","result":{"panes":[
+      {"agent_status":"unknown","cwd":"/Users/asaryu/memo","focused":false,"foreground_cwd":"/Users/asaryu/memo","pane_id":"w4:p1","revision":12,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":57},"tab_id":"w4:t1","terminal_id":"term_x","terminal_title":"nvim weekly-report.md","terminal_title_stripped":"nvim weekly-report.md","workspace_id":"w4"},
+      {"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"abc"},"agent_status":"idle","cwd":"/x","focused":false,"foreground_cwd":"/x","pane_id":"w5:p3","revision":5816,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":57},"tab_id":"w5:t3","terminal_id":"term_y","terminal_title":"title","terminal_title_stripped":"","workspace_id":"w5"}
+    ],"type":"pane_list"}}"#;
+
+    #[test]
+    fn parses_workspaces() {
+        let ws = parse_workspaces(WORKSPACE_JSON).unwrap();
+        assert_eq!(ws.len(), 2);
+        assert_eq!(ws[0].workspace_id, "w4");
+        assert_eq!(ws[0].label, "aaaaa");
+        assert_eq!(ws[0].active_tab_id.as_deref(), Some("w4:t1"));
+        assert!(!ws[0].focused);
+        assert!(ws[1].focused);
+        assert_eq!(ws[1].label, "herder-nav-with-preview");
+    }
+
+    #[test]
+    fn parses_tabs() {
+        let tabs = parse_tabs(TAB_JSON).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].tab_id, "w4:t1");
+        assert_eq!(tabs[0].workspace_id, "w4");
+        assert_eq!(tabs[1].tab_id, "wC:t1");
+        assert!(tabs[1].focused);
+    }
+
+    #[test]
+    fn parses_panes() {
+        let panes = parse_panes(PANE_JSON).unwrap();
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].pane_id, "w4:p1");
+        assert_eq!(panes[0].tab_id, "w4:t1");
+        assert_eq!(panes[0].agent, None);
+        assert_eq!(panes[1].agent.as_deref(), Some("claude"));
+        // Stripped title is empty -> display_title falls back to raw title.
+        assert_eq!(panes[1].display_title(), "title");
+        assert_eq!(panes[0].display_title(), "nvim weekly-report.md");
+    }
+
+    #[test]
+    fn empty_lists_parse() {
+        assert!(parse_workspaces(r#"{"result":{"workspaces":[]}}"#)
+            .unwrap()
+            .is_empty());
+        assert!(parse_tabs(r#"{"result":{"tabs":[]}}"#).unwrap().is_empty());
+        assert!(parse_panes(r#"{"result":{"panes":[]}}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_optional_fields_ok() {
+        // Only required ids present; optional fields default.
+        let panes = parse_panes(r#"{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}]}}"#).unwrap();
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].display_title(), "w1:p1");
+        assert!(!panes[0].focused);
+    }
+
+    #[test]
+    fn invalid_json_errors() {
+        assert!(parse_workspaces("not json").is_err());
+        assert!(parse_panes(r#"{"result":{}}"#).is_ok()); // panes defaults to empty
+    }
+}
