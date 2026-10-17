@@ -89,28 +89,19 @@ fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
     ))
 }
 
-/// Rebuild the tree after closing `closed_pane`, waiting briefly for herdr to
-/// actually drop the pane (and any now-empty tab/workspace) so the UI doesn't
-/// momentarily show a dead row. Gives up after a short budget and returns the
-/// latest tree regardless.
-fn rebuild_without(api: &dyn HerdrApi, closed_pane: &str) -> Result<Tree> {
-    use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_millis(500);
-    loop {
-        let panes = api.panes()?;
-        let still_present = panes.iter().any(|p| p.pane_id == closed_pane);
-        if !still_present || Instant::now() >= deadline {
-            let tabs = api.tabs()?;
-            let workspaces = api.workspaces()?;
-            return Ok(Tree::build(
-                workspaces,
-                tabs,
-                panes,
-                crate::herdr_client::own_pane_id().as_deref(),
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+/// Rebuild the tree right after closing `closed_pane`, filtering out both the
+/// navigator's own overlay pane and the just-closed pane. Non-blocking: if
+/// herdr's `pane list` hasn't dropped the closed pane yet, we remove it here so
+/// no dead row is shown; the next poll converges on the real state.
+fn build_tree_excluding(api: &dyn HerdrApi, closed_pane: &str) -> Result<Tree> {
+    let mut panes = api.panes()?;
+    panes.retain(|p| p.pane_id != closed_pane);
+    Ok(Tree::build(
+        api.workspaces()?,
+        api.tabs()?,
+        panes,
+        crate::herdr_client::own_pane_id().as_deref(),
+    ))
 }
 
 /// Color for an agent status, matching herdr's semantics.
@@ -369,6 +360,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         // Move selection to the new workspace.
                                         view.select_for_launch(Some(&new_id), None, None);
                                         scroll = 0;
+                                        current_pane = None;
+                                        guard.terminal().clear().ok();
                                     }
                                     Err(e) => {
                                         status = Some(format!("create failed: {e}"));
@@ -397,17 +390,20 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 match api.close_pane(&pane_id) {
                                     Ok(()) => {
                                         status = Some(format!("closed {pane_id}"));
-                                        // herdr removes the pane (and any now-empty
-                                        // tab/workspace) asynchronously. Rebuild
-                                        // once it's actually gone so the tree
-                                        // doesn't briefly show a dead row.
-                                        if let Ok(tree) = rebuild_without(api, &pane_id) {
+                                        // Rebuild immediately (non-blocking) and
+                                        // defensively drop the just-closed pane in
+                                        // case herdr's list hasn't updated yet.
+                                        if let Ok(tree) = build_tree_excluding(api, &pane_id) {
                                             view.set_tree(tree);
                                         }
-                                        // The tree shrank; reset the scroll so the
-                                        // view can't be stuck scrolled past the
-                                        // new, shorter content.
                                         scroll = 0;
+                                        // Force the poller to retarget to whatever
+                                        // is selected now (the old pane is gone).
+                                        current_pane = None;
+                                        // Fully repaint: closing a pane makes herdr
+                                        // re-lay-out and can leave our overlay with
+                                        // a dirty backbuffer.
+                                        guard.terminal().clear().ok();
                                     }
                                     Err(e) => {
                                         status = Some(format!("close failed: {e}"));
