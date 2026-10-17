@@ -17,18 +17,23 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use ansi_to_tui::IntoText;
+use ratatui::text::Text;
+
 use crate::herdr_client::{CliHerdr, HerdrApi};
 
 /// Poll interval for the live preview.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(1000);
-const PREVIEW_LINES: u32 = 200;
+const PREVIEW_LINES: u32 = 100;
 
-/// A preview result tagged with the generation it was requested under.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A preview result tagged with the generation it was requested under. The
+/// ANSI-colored text is parsed on the worker thread so the UI thread never
+/// pays the parsing cost.
+#[derive(Debug, Clone)]
 pub struct PreviewUpdate {
     pub generation: u64,
     pub pane_id: String,
-    pub text: String,
+    pub text: Text<'static>,
 }
 
 /// Request the worker thread should act on: which pane and which generation.
@@ -89,35 +94,43 @@ impl Poller {
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
             let api = CliHerdr::new();
-            let mut last_sent_pane: Option<String> = None;
-            let mut last_gen: u64 = u64::MAX;
+            // Remember the last raw text per generation so we can skip sending
+            // (and thus skip a UI redraw) when nothing changed.
+            let mut last_raw: Option<(u64, String)> = None;
             loop {
                 if thread_stop.load(Ordering::Relaxed) {
                     break;
                 }
                 let req = thread_request.lock().unwrap().clone();
                 if let Some(pane_id) = req.pane_id.clone() {
-                    // Fetch when the pane changed, the generation changed, or on
-                    // the periodic tick (we always refetch each tick for live
-                    // updates).
-                    let _ = last_sent_pane;
-                    let _ = last_gen;
-                    let text = match api.read_pane_ansi(&pane_id, PREVIEW_LINES) {
+                    let raw = match api.read_pane_ansi(&pane_id, PREVIEW_LINES) {
                         Ok(t) => t,
                         Err(e) => format!("(failed to read pane {pane_id}: {e})"),
                     };
-                    last_sent_pane = Some(pane_id.clone());
-                    last_gen = req.generation;
-                    // If the send fails the UI is gone; stop.
-                    if tx
-                        .send(PreviewUpdate {
-                            generation: req.generation,
-                            pane_id,
-                            text,
-                        })
-                        .is_err()
-                    {
-                        break;
+
+                    // Skip if the content is identical to what we last sent for
+                    // this generation; avoids a needless UI redraw every tick.
+                    let unchanged = matches!(
+                        &last_raw,
+                        Some((g, prev)) if *g == req.generation && *prev == raw
+                    );
+                    if !unchanged {
+                        // Parse ANSI here, off the UI thread.
+                        let text = raw
+                            .as_bytes()
+                            .into_text()
+                            .unwrap_or_else(|_| Text::from(raw.clone()));
+                        last_raw = Some((req.generation, raw));
+                        if tx
+                            .send(PreviewUpdate {
+                                generation: req.generation,
+                                pane_id,
+                                text,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
                 // Sleep in small slices so stop is responsive.
@@ -187,7 +200,7 @@ mod tests {
         let late = PreviewUpdate {
             generation: gen_a,
             pane_id: "A".into(),
-            text: "old".into(),
+            text: Text::from("old"),
         };
         let _gen_b = s.bump(); // 2 (selection moved to B)
         assert!(!s.accepts(late.generation));
@@ -200,7 +213,7 @@ mod tests {
         let upd = PreviewUpdate {
             generation: g,
             pane_id: "A".into(),
-            text: "fresh".into(),
+            text: Text::from("fresh"),
         };
         assert!(s.accepts(upd.generation));
     }

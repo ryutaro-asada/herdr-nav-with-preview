@@ -6,7 +6,6 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ansi_to_tui::IntoText;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -117,8 +116,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     let mut poll_state = PollState::new();
     let mut current_pane = selected_pane_id(view);
     let generation = poll_state.generation();
-    let mut preview = String::new();
-    // Cache the ANSI-parsed preview so we only parse when the text changes.
+    // The preview is parsed to colored Text on the poller thread; the UI only
+    // stores and renders it.
     let mut preview_text: Text<'static> = Text::default();
     let mut status: Option<String> = None;
 
@@ -177,7 +176,6 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
         let new_pane = selected_pane_id(view);
         if new_pane != current_pane {
             let gen = poll_state.bump();
-            preview.clear();
             preview_text = Text::default();
             dirty = true;
             poller.set_request(PollRequest {
@@ -187,18 +185,13 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             current_pane = new_pane;
         }
 
-        // Drain any pending updates; apply only the current generation. Parse
-        // ANSI once here (not every frame) and mark the frame dirty.
+        // Drain any pending updates; apply only the current generation. The
+        // text is already ANSI-parsed by the poller, so this is just a move.
         while let Ok(update) = poller.updates.try_recv() {
             if poll_state.accepts(update.generation)
                 && Some(&update.pane_id) == current_pane.as_ref()
-                && update.text != preview
             {
-                preview = update.text;
-                preview_text = preview
-                    .as_bytes()
-                    .into_text()
-                    .unwrap_or_else(|_| Text::from(preview.clone()));
+                preview_text = update.text;
                 dirty = true;
             }
         }
