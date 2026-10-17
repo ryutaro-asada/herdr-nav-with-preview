@@ -454,32 +454,40 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         }
                                         scroll = 0;
                                         current_pane = None;
-                                        // herdr may move focus within our home
-                                        // workspace when a pane closes. Re-assert
-                                        // the user's original pane so their place
-                                        // doesn't jump — but only if that pane
-                                        // still exists and isn't the one we closed.
-                                        if let (Some(hp), Ok(tree)) =
-                                            (home.focused_pane_id.as_deref(), &fresh)
-                                        {
-                                            let still_there = tree
-                                                .workspaces
-                                                .iter()
-                                                .flat_map(|w| &w.tabs)
-                                                .flat_map(|t| &t.panes)
-                                                .any(|p| p.pane_id == hp);
-                                            if hp != pane_id && still_there {
-                                                if let Some(ws) = home.workspace_id.as_deref() {
-                                                    let _ = api.focus_workspace(ws);
-                                                }
-                                                if let Some(tab) = home.tab_id.as_deref() {
-                                                    let _ = api.focus_tab(tab);
+                                        // When running as an overlay *pane*, herdr
+                                        // may move focus within our home workspace
+                                        // on close, so we re-assert the user's
+                                        // original pane. As a popup we must NOT
+                                        // change focus here: a focus change while
+                                        // the popup is open dismisses it (flinging
+                                        // the user out of nav). Popups restore the
+                                        // prior focus automatically when closed.
+                                        let is_popup =
+                                            crate::herdr_client::own_pane_id().is_none();
+                                        if !is_popup {
+                                            if let (Some(hp), Ok(tree)) =
+                                                (home.focused_pane_id.as_deref(), &fresh)
+                                            {
+                                                let still_there = tree
+                                                    .workspaces
+                                                    .iter()
+                                                    .flat_map(|w| &w.tabs)
+                                                    .flat_map(|t| &t.panes)
+                                                    .any(|p| p.pane_id == hp);
+                                                if hp != pane_id && still_there {
+                                                    if let Some(ws) =
+                                                        home.workspace_id.as_deref()
+                                                    {
+                                                        let _ = api.focus_workspace(ws);
+                                                    }
+                                                    if let Some(tab) = home.tab_id.as_deref() {
+                                                        let _ = api.focus_tab(tab);
+                                                    }
                                                 }
                                             }
                                         }
-                                        // Fully repaint: closing a pane makes herdr
-                                        // re-lay-out and can leave our overlay with
-                                        // a dirty backbuffer.
+                                        // Repaint: closing can leave a dirty
+                                        // backbuffer behind the popup.
                                         guard.terminal().clear().ok();
                                     }
                                     Err(e) => {
