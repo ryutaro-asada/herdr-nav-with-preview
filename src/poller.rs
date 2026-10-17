@@ -10,10 +10,7 @@
 //! unit-tested; the thread wiring is a thin shell around it.
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -22,7 +19,7 @@ use ratatui::text::Text;
 
 use crate::herdr_client::{CliHerdr, HerdrApi};
 
-/// Poll interval for the live preview.
+/// Poll interval for the live preview when the selection is unchanged.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const PREVIEW_LINES: u32 = 100;
 
@@ -72,11 +69,19 @@ impl PollState {
     }
 }
 
+/// Shared state between the UI thread and the worker, guarded by a mutex and
+/// paired with a condvar so the worker wakes immediately when the request
+/// changes (e.g. the user moves to a different pane) instead of finishing a
+/// full sleep interval first.
+struct Shared {
+    request: PollRequest,
+    stop: bool,
+}
+
 /// Handle to the running poll thread.
 pub struct Poller {
     pub updates: Receiver<PreviewUpdate>,
-    request: Arc<Mutex<PollRequest>>,
-    stop: Arc<AtomicBool>,
+    shared: Arc<(Mutex<Shared>, Condvar)>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -87,35 +92,42 @@ impl Poller {
     pub fn spawn(initial: PollRequest) -> Self {
         let (tx, rx): (Sender<PreviewUpdate>, Receiver<PreviewUpdate>) =
             std::sync::mpsc::channel();
-        let request = Arc::new(Mutex::new(initial));
-        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new((
+            Mutex::new(Shared {
+                request: initial,
+                stop: false,
+            }),
+            Condvar::new(),
+        ));
 
-        let thread_request = Arc::clone(&request);
-        let thread_stop = Arc::clone(&stop);
+        let thread_shared = Arc::clone(&shared);
         let handle = thread::spawn(move || {
             let api = CliHerdr::new();
             // Remember the last raw text per generation so we can skip sending
             // (and thus skip a UI redraw) when nothing changed.
             let mut last_raw: Option<(u64, String)> = None;
+            let (lock, cvar) = &*thread_shared;
+
             loop {
-                if thread_stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let req = thread_request.lock().unwrap().clone();
+                // Snapshot the current request under the lock.
+                let req = {
+                    let guard = lock.lock().unwrap();
+                    if guard.stop {
+                        break;
+                    }
+                    guard.request.clone()
+                };
+
                 if let Some(pane_id) = req.pane_id.clone() {
                     let raw = match api.read_pane_ansi(&pane_id, PREVIEW_LINES) {
                         Ok(t) => t,
                         Err(e) => format!("(failed to read pane {pane_id}: {e})"),
                     };
-
-                    // Skip if the content is identical to what we last sent for
-                    // this generation; avoids a needless UI redraw every tick.
                     let unchanged = matches!(
                         &last_raw,
                         Some((g, prev)) if *g == req.generation && *prev == raw
                     );
                     if !unchanged {
-                        // Parse ANSI here, off the UI thread.
                         let text = raw
                             .as_bytes()
                             .into_text()
@@ -133,35 +145,48 @@ impl Poller {
                         }
                     }
                 }
-                // Sleep in small slices so stop is responsive.
-                let mut slept = Duration::ZERO;
-                while slept < POLL_INTERVAL {
-                    if thread_stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                    slept += Duration::from_millis(50);
+
+                // Wait up to POLL_INTERVAL, but wake early if the request
+                // changed (new pane) or stop was requested. Re-fetch
+                // immediately when the generation advanced.
+                let guard = lock.lock().unwrap();
+                let (guard, _timeout) = cvar
+                    .wait_timeout_while(guard, POLL_INTERVAL, |s| {
+                        !s.stop && s.request.generation == req.generation
+                    })
+                    .unwrap();
+                if guard.stop {
+                    break;
                 }
             }
         });
 
         Self {
             updates: rx,
-            request,
-            stop,
+            shared,
             handle: Some(handle),
         }
     }
 
-    /// Point the worker at a new pane/generation.
+    /// Point the worker at a new pane/generation and wake it immediately.
     pub fn set_request(&self, req: PollRequest) {
-        *self.request.lock().unwrap() = req;
+        let (lock, cvar) = &*self.shared;
+        {
+            let mut guard = lock.lock().unwrap();
+            guard.request = req;
+        }
+        cvar.notify_all();
     }
 }
 
 impl Drop for Poller {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        let (lock, cvar) = &*self.shared;
+        {
+            let mut guard = lock.lock().unwrap();
+            guard.stop = true;
+        }
+        cvar.notify_all();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -216,5 +241,48 @@ mod tests {
             text: Text::from("fresh"),
         };
         assert!(s.accepts(upd.generation));
+    }
+
+    // Live integration check: proves the worker wakes immediately on a request
+    // change instead of waiting out the poll interval. Requires a running herdr
+    // with at least one pane. Run explicitly:
+    //   cargo test -- --ignored switch_latency
+    #[test]
+    #[ignore]
+    fn switch_latency_is_fast() {
+        use std::time::Instant;
+
+        let api = CliHerdr::new();
+        let panes = api.panes().expect("herdr must be running");
+        assert!(panes.len() >= 2, "need at least two panes");
+
+        // Start on pane 0 and drain its first update.
+        let poller = Poller::spawn(PollRequest {
+            generation: 1,
+            pane_id: Some(panes[0].pane_id.clone()),
+        });
+        let _ = poller.updates.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // Switch to pane 1 and time how long the first update for gen 2 takes.
+        let start = Instant::now();
+        poller.set_request(PollRequest {
+            generation: 2,
+            pane_id: Some(panes[1].pane_id.clone()),
+        });
+        loop {
+            let upd = poller
+                .updates
+                .recv_timeout(Duration::from_secs(2))
+                .expect("update should arrive");
+            if upd.generation == 2 {
+                break;
+            }
+        }
+        let elapsed = start.elapsed();
+        // Must be far below the 1s poll interval thanks to the condvar wake.
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "switch took too long: {elapsed:?}"
+        );
     }
 }

@@ -25,7 +25,7 @@ use crate::poller::{PollRequest, PollState, Poller};
 use crate::view::{RowKind, TreeView};
 
 /// How long to wait for a key event before checking for preview updates.
-const EVENT_POLL: Duration = Duration::from_millis(100);
+const EVENT_POLL: Duration = Duration::from_millis(30);
 
 /// RAII guard: enters raw mode + alternate screen on construction and restores
 /// the terminal on drop. Installs a panic hook so a panic also restores.
