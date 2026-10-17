@@ -78,6 +78,34 @@ fn selected_pane_id(view: &TreeView) -> Option<String> {
     row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
 }
 
+/// Truncate `s` so its display width fits in `max_width` columns, appending an
+/// ellipsis when truncated. Honors wide (CJK) characters so Japanese titles
+/// don't overrun the pane. Pure and unit-tested.
+fn truncate_display(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if max_width == 0 {
+        return String::new();
+    }
+    let total: usize = s.chars().map(|c| c.width().unwrap_or(0)).sum();
+    if total <= max_width {
+        return s.to_string();
+    }
+    // Reserve one column for the ellipsis.
+    let budget = max_width.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
 /// Run the TUI event loop. A background `Poller` refreshes the selected pane's
 /// preview once per second; the loop polls for key events with a short timeout
 /// and drains preview updates each iteration, applying only current-generation
@@ -161,14 +189,26 @@ pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str, status: 
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(outer[0]);
 
     let rows = view.rows();
     let selected = view.selected_index();
 
-    let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
+    // Vertical scroll: keep the selected row visible when the tree is taller
+    // than the pane. Inner height excludes the top/bottom border rows.
+    let tree_inner_height = chunks[0].height.saturating_sub(2) as usize;
+    let offset = view.scroll_offset(tree_inner_height);
+    // Inner width excludes the left/right borders; used to trim long labels.
+    let tree_inner_width = chunks[0].width.saturating_sub(2) as usize;
+
+    let mut lines: Vec<Line> = Vec::with_capacity(tree_inner_height.max(1));
+    for (i, row) in rows
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(tree_inner_height.max(1))
+    {
         let indent = "  ".repeat(row.depth);
         let marker = if row.expandable {
             if row.expanded {
@@ -179,7 +219,7 @@ pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str, status: 
         } else {
             "  "
         };
-        let content = format!("{indent}{marker}{}", row.label);
+        let content = truncate_display(&format!("{indent}{marker}{}", row.label), tree_inner_width);
         let style = if i == selected {
             Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
         } else {
@@ -232,4 +272,34 @@ pub fn draw(frame: &mut ratatui::Frame, view: &TreeView, preview: &str, status: 
         ),
     };
     frame.render_widget(Paragraph::new(bar), outer[1]);
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_display;
+
+    #[test]
+    fn no_truncation_when_fits() {
+        assert_eq!(truncate_display("hello", 10), "hello");
+        assert_eq!(truncate_display("hello", 5), "hello");
+    }
+
+    #[test]
+    fn ascii_truncates_with_ellipsis() {
+        // 10 chars into width 5 -> 4 chars + ellipsis.
+        assert_eq!(truncate_display("abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn wide_chars_counted_as_two() {
+        // Each CJK char is width 2. Width budget 5 -> ellipsis reserves 1,
+        // leaving 4 cols = two wide chars.
+        assert_eq!(truncate_display("あいうえお", 5), "あい…");
+    }
+
+    #[test]
+    fn zero_width_is_empty() {
+        assert_eq!(truncate_display("anything", 0), "");
+    }
 }

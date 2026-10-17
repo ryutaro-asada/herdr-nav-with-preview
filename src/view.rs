@@ -101,6 +101,22 @@ fn tab_key(id: &str) -> String {
     format!("t:{id}")
 }
 
+/// Compute the first visible row index so that `selected` stays within a
+/// window of `height` rows out of `total`. Pure and unit-tested.
+fn scroll_offset(selected: usize, total: usize, height: usize) -> usize {
+    if height == 0 || total <= height {
+        return 0;
+    }
+    let max_offset = total - height;
+    // Keep the selection on screen: if it would fall below the window, scroll
+    // down just enough; the window never scrolls past the last row.
+    if selected < height {
+        0
+    } else {
+        (selected + 1 - height).min(max_offset)
+    }
+}
+
 pub struct TreeView {
     tree: Tree,
     /// Keys of nodes that are collapsed. Default (absent) == expanded.
@@ -215,6 +231,13 @@ impl TreeView {
         if self.selected > 0 {
             self.selected -= 1;
         }
+    }
+
+    /// First row index to render so the selected row stays visible within a
+    /// viewport of `height` rows. Keeps the selection on screen when the tree
+    /// is taller than the pane.
+    pub fn scroll_offset(&self, height: usize) -> usize {
+        scroll_offset(self.selected, self.rows().len(), height)
     }
 
     fn selected_key(&self) -> Option<String> {
@@ -425,5 +448,22 @@ mod tests {
         assert_eq!(pp.workspace_id.as_deref(), Some("w1"));
         assert_eq!(pp.tab_id.as_deref(), Some("w1:t1"));
         assert_eq!(pp.pane_id.as_deref(), Some("w1:p1"));
+    }
+
+    #[test]
+    fn scroll_offset_behaviour() {
+        // Everything fits: no scroll.
+        assert_eq!(scroll_offset(0, 5, 10), 0);
+        assert_eq!(scroll_offset(4, 5, 5), 0);
+        // Zero height is a safe no-op.
+        assert_eq!(scroll_offset(3, 10, 0), 0);
+        // Selection within the first window: offset 0.
+        assert_eq!(scroll_offset(2, 20, 5), 0);
+        assert_eq!(scroll_offset(4, 20, 5), 0);
+        // Selection past the window: scroll so selection is the last visible row.
+        assert_eq!(scroll_offset(5, 20, 5), 1);
+        assert_eq!(scroll_offset(9, 20, 5), 5);
+        // Never scroll past the end.
+        assert_eq!(scroll_offset(19, 20, 5), 15);
     }
 }
