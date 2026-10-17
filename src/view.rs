@@ -146,6 +146,44 @@ impl TreeView {
         &self.tree
     }
 
+    /// Move the initial selection to the row that best matches the launch
+    /// context: the focused pane if present, else the tab, else the workspace.
+    /// Falls back to leaving selection at 0 when nothing matches.
+    pub fn select_for_launch(
+        &mut self,
+        workspace_id: Option<&str>,
+        tab_id: Option<&str>,
+        pane_id: Option<&str>,
+    ) {
+        let rows = self.rows();
+        // Priority 1: exact pane row.
+        if let Some(pid) = pane_id {
+            if let Some(i) = rows.iter().position(|r| {
+                matches!(&r.kind, RowKind::Pane { pane_id, .. } if pane_id == pid)
+            }) {
+                self.selected = i;
+                return;
+            }
+        }
+        // Priority 2: tab row.
+        if let Some(tid) = tab_id {
+            if let Some(i) = rows.iter().position(|r| {
+                matches!(&r.kind, RowKind::Tab { tab_id, .. } if tab_id == tid)
+            }) {
+                self.selected = i;
+                return;
+            }
+        }
+        // Priority 3: workspace row.
+        if let Some(wid) = workspace_id {
+            if let Some(i) = rows.iter().position(|r| {
+                matches!(&r.kind, RowKind::Workspace { workspace_id } if workspace_id == wid)
+            }) {
+                self.selected = i;
+            }
+        }
+    }
+
     pub fn selected_index(&self) -> usize {
         self.selected
     }
@@ -472,7 +510,6 @@ mod tests {
         let view = TreeView::new(sample_tree());
         let rows = view.rows();
         let tree = view.tree();
-
         // Workspace row -> workspace + its first tab/pane.
         let wp = rows[0].focus_plan(tree);
         assert_eq!(wp.workspace_id.as_deref(), Some("w1"));
@@ -507,5 +544,27 @@ mod tests {
         assert_eq!(scroll_offset(9, 20, 5), 5);
         // Never scroll past the end.
         assert_eq!(scroll_offset(19, 20, 5), 15);
+    }
+
+    #[test]
+    fn select_for_launch_prefers_pane_then_tab_then_workspace() {
+        // Rows: 0=w1, 1=w1:t1, 2=w1:p1, 3=w1:t2, 4=w1:p2
+        let mut v = TreeView::new(sample_tree());
+        v.select_for_launch(Some("w1"), Some("w1:t2"), Some("w1:p2"));
+        assert_eq!(v.selected_index(), 4); // pane wins
+
+        let mut v = TreeView::new(sample_tree());
+        v.select_for_launch(Some("w1"), Some("w1:t2"), None);
+        assert_eq!(v.selected_index(), 3); // tab
+
+        let mut v = TreeView::new(sample_tree());
+        v.select_for_launch(Some("w1"), None, None);
+        assert_eq!(v.selected_index(), 0); // workspace
+
+        // Unknown ids leave selection at 0.
+        let mut v = TreeView::new(sample_tree());
+        v.move_down();
+        v.select_for_launch(Some("zzz"), Some("zzz"), Some("zzz"));
+        assert_eq!(v.selected_index(), 1); // unchanged
     }
 }

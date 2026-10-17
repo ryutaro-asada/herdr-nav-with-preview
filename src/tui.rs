@@ -160,22 +160,30 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         name_style = name_style.add_modifier(Modifier::BOLD);
     }
 
-    // Compose name + optional agent badge, then truncate to width.
-    let agent_badge = row
-        .agent
-        .as_deref()
-        .map(|a| format!("  {a}"))
-        .unwrap_or_default();
-    // Reserve roughly the width already consumed by prefix spans.
+    // Width already consumed by the prefix spans.
     let used: usize = spans
         .iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
+    let agent_badge = row.agent.as_deref().map(|a| format!("  {a}"));
+    let badge_w = agent_badge
+        .as_deref()
+        .map(unicode_width::UnicodeWidthStr::width)
+        .unwrap_or(0);
     let avail = width.saturating_sub(used);
-    let name = truncate_display(&format!("{}{}", row.name, agent_badge), avail.max(1));
+    // Truncate the name, leaving room for the agent badge when present.
+    let name = truncate_display(&row.name, avail.saturating_sub(badge_w).max(1));
     spans.push(Span::styled(name, name_style));
+    if let Some(badge) = agent_badge {
+        spans.push(Span::styled(badge, Style::default().fg(Color::DarkGray)));
+    }
 
-    Line::from(spans)
+    // Whole-line background highlight for the selected row.
+    let mut line = Line::from(spans);
+    if selected {
+        line = line.style(Style::default().bg(Color::Rgb(40, 44, 52)));
+    }
+    line
 }
 
 /// Truncate `s` so its display width fits in `max_width` columns, appending an
@@ -383,11 +391,14 @@ pub fn draw(
     let bar = match status {
         Some(s) => Line::from(Span::styled(
             format!(" {s} "),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
         )),
-        None => Line::from(
-            " ↑/↓ move  ←/→ collapse/expand  space toggle  Enter jump  q/Esc quit ".to_string(),
-        ),
+        None => Line::from(Span::styled(
+            " ↑/↓ move   ←/→ fold   space toggle   ⏎ jump   q quit ",
+            Style::default().fg(Color::DarkGray),
+        )),
     };
     frame.render_widget(Paragraph::new(bar), outer[1]);
 }

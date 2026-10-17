@@ -101,6 +101,15 @@ fn run_tui() -> Result<()> {
     let api = CliHerdr::new();
     let tree = build_tree(&api)?;
     let mut view = TreeView::new(tree);
+
+    // Preselect the row for the pane the user was on when they opened nav.
+    let ctx = herdr_client::LaunchContext::from_env();
+    view.select_for_launch(
+        ctx.workspace_id.as_deref(),
+        ctx.tab_id.as_deref(),
+        ctx.focused_pane_id.as_deref(),
+    );
+
     match tui::run(&mut view, &api)? {
         LoopOutcome::Quit | LoopOutcome::Jumped => {}
     }

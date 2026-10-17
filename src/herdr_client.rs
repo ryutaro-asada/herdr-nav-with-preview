@@ -24,6 +24,49 @@ pub fn herdr_bin() -> String {
     std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
 }
 
+/// The pane/tab/workspace the overlay was launched from, so the navigator can
+/// preselect the row for the pane the user was on. herdr injects
+/// `HERDR_PLUGIN_CONTEXT_JSON` (richest, includes `focused_pane_id`) plus
+/// `HERDR_WORKSPACE_ID` / `HERDR_TAB_ID`. Note `HERDR_PANE_ID` is the overlay's
+/// *own* pane, not the origin, so we must not use it here.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct LaunchContext {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    #[serde(default)]
+    pub focused_pane_id: Option<String>,
+}
+
+impl LaunchContext {
+    /// Read the launch context from the environment herdr injects.
+    pub fn from_env() -> Self {
+        if let Ok(json) = std::env::var("HERDR_PLUGIN_CONTEXT_JSON") {
+            if let Ok(ctx) = Self::from_json(&json) {
+                // Backfill workspace/tab from the dedicated vars if missing.
+                return ctx.with_env_fallback();
+            }
+        }
+        LaunchContext::default().with_env_fallback()
+    }
+
+    fn with_env_fallback(mut self) -> Self {
+        if self.workspace_id.is_none() {
+            self.workspace_id = std::env::var("HERDR_WORKSPACE_ID").ok();
+        }
+        if self.tab_id.is_none() {
+            self.tab_id = std::env::var("HERDR_TAB_ID").ok();
+        }
+        self
+    }
+
+    /// Parse from the `HERDR_PLUGIN_CONTEXT_JSON` payload.
+    pub fn from_json(json: &str) -> Result<Self> {
+        serde_json::from_str(json).context("failed to parse HERDR_PLUGIN_CONTEXT_JSON")
+    }
+}
+
 /// A herdr workspace (top-level project container).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Workspace {
@@ -452,5 +495,23 @@ mod tests {
         let plan = FocusPlan::workspace("w2");
         api.apply_focus(&plan).unwrap();
         assert_eq!(*api.calls.borrow(), vec!["ws:w2"]);
+    }
+
+    #[test]
+    fn launch_context_parses_focused_pane() {
+        // Real shape from HERDR_PLUGIN_CONTEXT_JSON (0.7.5).
+        let json = r#"{"workspace_id":"wC","workspace_label":"proj","tab_id":"wC:t1","focused_pane_id":"wC:p1","focused_pane_agent":"kiro","invocation_source":"api"}"#;
+        let ctx = LaunchContext::from_json(json).unwrap();
+        assert_eq!(ctx.workspace_id.as_deref(), Some("wC"));
+        assert_eq!(ctx.tab_id.as_deref(), Some("wC:t1"));
+        assert_eq!(ctx.focused_pane_id.as_deref(), Some("wC:p1"));
+    }
+
+    #[test]
+    fn launch_context_tolerates_missing_fields() {
+        let ctx = LaunchContext::from_json(r#"{"workspace_id":"wA"}"#).unwrap();
+        assert_eq!(ctx.workspace_id.as_deref(), Some("wA"));
+        assert_eq!(ctx.tab_id, None);
+        assert_eq!(ctx.focused_pane_id, None);
     }
 }
