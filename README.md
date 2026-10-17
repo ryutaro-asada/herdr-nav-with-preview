@@ -19,9 +19,10 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 ## Features
 
 - Collapsible `workspace > tab > pane` tree with per-kind icons and agent status.
+- Incremental search (`/`) to filter the tree by name, agent, or id.
 - Live preview of the selected pane, refreshed about once per second.
 - `Enter` focuses the selected pane and closes the navigator.
-- `n` creates a new workspace; `x` closes the selected pane (with confirmation).
+- `n` adds a tab, `N` adds a workspace; `x` closes the selected pane (with confirmation).
 - Single self-contained Rust binary; installed from a prebuilt release (or built with `cargo build --release`).
 
 ## Keys
@@ -30,8 +31,10 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 | --- | --- |
 | `↑` / `↓` (or `k` / `j`) | Move selection |
 | `←` / `→` (or `h` / `l`) | Collapse / expand |
-| `n` | Create a new workspace (name prompt; defaults to the next number) |
-| `x` | Close the selected pane (`y`/`Enter` to confirm) |
+| `/` | Incremental search: filter the tree by name, agent, or id |
+| `n` | Add a tab to the selected workspace (name prompt) |
+| `N` | Add a workspace (name prompt; defaults to the project directory name) |
+| `x` | Close the selected pane (`Enter` to confirm, `Esc` to cancel) |
 | `Enter` | Focus the selected pane and close the navigator |
 | `q` / `Esc` | Quit without jumping |
 

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -314,6 +314,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     let mut input_buf: Option<String> = None;
     // What the current prompt will create (workspace or tab).
     let mut input_target: Option<InputTarget> = None;
+    // True while the incremental search prompt is active (`/`).
+    let mut searching = false;
 
     // The pane/tab/workspace the user was on when they opened the navigator.
     // After a destructive action (close) herdr may re-assign focus within our
@@ -338,13 +340,17 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             let title = preview_title(&rows, selected);
             // In text-entry mode, show the prompt (with a cursor) in the bar;
             // otherwise show the current status/help.
-            let bar_text = input_buf.as_ref().map(|b| {
-                let what = match input_target {
-                    Some(InputTarget::Tab { .. }) => "new tab name",
-                    _ => "new workspace name",
-                };
-                format!("{what}: {b}\u{2588}")
-            });
+            let bar_text = if searching {
+                Some(format!("/{}\u{2588}  ({} matches)", view.query(), rows.len()))
+            } else {
+                input_buf.as_ref().map(|b| {
+                    let what = match input_target {
+                        Some(InputTarget::Tab { .. }) => "new tab name",
+                        _ => "new workspace name",
+                    };
+                    format!("{what}: {b}\u{2588}")
+                })
+            };
             let bar = bar_text.as_deref().or(status.as_deref());
             let mut scroll_ref = scroll;
             guard.terminal().draw(|frame| {
@@ -367,8 +373,44 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                 if key.kind == KeyEventKind::Press {
                     dirty = true;
 
-                    // Name-entry mode (for new tab or workspace) takes priority.
-                    if let Some(buf) = input_buf.as_mut() {
+                    // Incremental search mode (entered with `/`) takes top
+                    // priority: printable keys edit the query and filter live,
+                    // but Up/Down still move within the results, and Enter jumps.
+                    if searching {
+                        match key.code {
+                            KeyCode::Esc => {
+                                searching = false;
+                                view.clear_query();
+                            }
+                            KeyCode::Enter => {
+                                // Confirm the search: keep the filtered view but
+                                // leave edit mode so normal keys work. If a row
+                                // is selected, jump to it (same as normal Enter).
+                                searching = false;
+                                if let Some(row) = view.selected_row() {
+                                    let plan = row.focus_plan(view.tree());
+                                    match api.apply_focus(&plan) {
+                                        Ok(()) => return Ok(LoopOutcome::Jumped),
+                                        Err(e) => status = Some(format!("focus failed: {e}")),
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => view.pop_query_char(),
+                            KeyCode::Down => view.move_down(),
+                            KeyCode::Up => view.move_up(),
+                            // Ctrl+n / Ctrl+p move within results (fzf-style).
+                            // Must be handled before the plain Char arm so the
+                            // letters don't get typed into the query.
+                            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                view.move_down()
+                            }
+                            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                view.move_up()
+                            }
+                            KeyCode::Char(c) => view.push_query_char(c),
+                            _ => {}
+                        }
+                    } else if let Some(buf) = input_buf.as_mut() {
                         match key.code {
                             KeyCode::Enter => {
                                 let label = buf.trim().to_string();
@@ -502,7 +544,22 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                         confirm_close = None;
                     } else {
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
+                            KeyCode::Char('q') => return Ok(LoopOutcome::Quit),
+                            KeyCode::Esc => {
+                                // Esc clears an active search filter first;
+                                // otherwise it quits.
+                                if view.is_searching() {
+                                    view.clear_query();
+                                } else {
+                                    return Ok(LoopOutcome::Quit);
+                                }
+                            }
+                            KeyCode::Char('/') => {
+                                // Enter incremental search mode.
+                                searching = true;
+                                view.clear_query();
+                                status = None;
+                            }
                             KeyCode::Char('n') => {
                                 // Open a prompt to add a tab to the selected
                                 // workspace. Default name is the next tab number.
@@ -722,7 +779,7 @@ pub fn draw(
                 .add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
-            " ↑/↓ move   ←/→ fold   ⏎ jump   n tab   N space   x close   q quit ",
+            " ↑/↓ move   ←/→ fold   / search   ⏎ jump   n tab   N space   x close   q quit ",
             Style::default().fg(Color::DarkGray),
         )),
     };
