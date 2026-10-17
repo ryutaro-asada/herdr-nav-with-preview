@@ -31,6 +31,12 @@ pub fn own_pane_id() -> Option<String> {
     std::env::var("HERDR_PANE_ID").ok().filter(|s| !s.is_empty())
 }
 
+/// The tab the navigator's overlay lives in (`HERDR_TAB_ID`). Closing panes in
+/// this tab would take the overlay down with it, so the UI refuses to.
+pub fn own_tab_id() -> Option<String> {
+    std::env::var("HERDR_TAB_ID").ok().filter(|s| !s.is_empty())
+}
+
 /// The pane/tab/workspace the overlay was launched from, so the navigator can
 /// preselect the row for the pane the user was on. herdr injects
 /// `HERDR_PLUGIN_CONTEXT_JSON` (richest, includes `focused_pane_id`) plus
