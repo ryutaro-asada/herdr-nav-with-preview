@@ -11,6 +11,11 @@ pane on the right. Press `Enter` to jump straight to the pane.
 The popup is a session-modal window: it does not add a pane to your layout and
 leaves nothing behind when it closes.
 
+## demo
+https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
+
+
+
 ## Features
 
 - Collapsible `workspace > tab > pane` tree with per-kind icons and agent status.
