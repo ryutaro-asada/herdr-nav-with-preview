@@ -570,7 +570,9 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                                 .map(|r| r.name)
                                                 .unwrap_or_else(|| pane_id.clone());
                                             confirm_close = Some(pane_id);
-                                            status = Some(format!("kill pane \"{name}\"? (y/n)"));
+                                            status = Some(format!(
+                                                "kill pane \"{name}\"?  Enter = yes   Esc = no"
+                                            ));
                                         }
                                     }
                                     _ => {
