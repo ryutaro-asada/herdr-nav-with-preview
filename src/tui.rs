@@ -468,11 +468,16 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 });
                                 match ws {
                                     Some(wid) => match api.create_tab(&wid) {
-                                        Ok(_new_tab) => {
+                                        Ok(new_tab) => {
                                             status = Some("added tab".to_string());
                                             if let Ok(tree) = build_tree(api) {
                                                 view.set_tree(tree);
                                             }
+                                            // Move selection onto the new tab's
+                                            // pane so the cursor follows the tab
+                                            // we just added (and Enter would jump
+                                            // there, not to some unrelated pane).
+                                            view.select_for_launch(Some(&wid), Some(&new_tab), None);
                                             current_pane = None;
                                             // No full clear() here: adding a tab
                                             // doesn't disturb our popup, and a
