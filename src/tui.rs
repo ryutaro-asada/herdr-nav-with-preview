@@ -277,64 +277,68 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     dirty = true;
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
-                        KeyCode::Enter => {
-                            if let Some(row) = view.selected_row() {
-                                let plan = row.focus_plan(view.tree());
-                                match api.apply_focus(&plan) {
-                                    Ok(()) => return Ok(LoopOutcome::Jumped),
-                                    Err(e) => {
-                                        status = Some(format!("focus failed: {e}"));
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => view.move_down(),
-                        KeyCode::Up | KeyCode::Char('k') => view.move_up(),
-                        KeyCode::Right | KeyCode::Char('l') => view.expand(),
-                        KeyCode::Left | KeyCode::Char('h') => view.collapse(),
-                        KeyCode::Char(' ') => view.toggle(),
-                        KeyCode::Char('x') => {
-                            // Close the selected pane. Destructive, so require a
-                            // confirming second `x` on the same pane.
-                            match view.selected_row().map(|r| r.kind) {
-                                Some(RowKind::Pane { pane_id, .. }) => {
-                                    if confirm_close.as_deref() == Some(pane_id.as_str()) {
-                                        match api.close_pane(&pane_id) {
-                                            Ok(()) => {
-                                                status = Some(format!("closed {pane_id}"));
-                                                // Rebuild the tree so the row disappears.
-                                                if let Ok(tree) = build_tree(api) {
-                                                    view.set_tree(tree);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                status = Some(format!("close failed: {e}"));
-                                            }
+
+                    // When a close is pending, intercept keys as a yes/no
+                    // confirmation (tmux style): y or Enter confirms, anything
+                    // else cancels.
+                    if let Some(pane_id) = confirm_close.clone() {
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                                match api.close_pane(&pane_id) {
+                                    Ok(()) => {
+                                        status = Some(format!("closed {pane_id}"));
+                                        if let Ok(tree) = build_tree(api) {
+                                            view.set_tree(tree);
                                         }
-                                        confirm_close = None;
-                                    } else {
-                                        confirm_close = Some(pane_id);
-                                        status =
-                                            Some("press x again to close this pane".to_string());
+                                    }
+                                    Err(e) => {
+                                        status = Some(format!("close failed: {e}"));
                                     }
                                 }
-                                _ => {
-                                    status = Some("select a pane to close".to_string());
-                                    confirm_close = None;
-                                }
+                            }
+                            _ => {
+                                status = None;
                             }
                         }
-                        _ => {
-                            dirty = false;
-                        }
-                    }
-                    // Any key other than a second `x` cancels a pending close.
-                    if !matches!(key.code, KeyCode::Char('x')) {
-                        if confirm_close.is_some() {
-                            confirm_close = None;
-                            status = None;
+                        confirm_close = None;
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(LoopOutcome::Quit),
+                            KeyCode::Enter => {
+                                if let Some(row) = view.selected_row() {
+                                    let plan = row.focus_plan(view.tree());
+                                    match api.apply_focus(&plan) {
+                                        Ok(()) => return Ok(LoopOutcome::Jumped),
+                                        Err(e) => {
+                                            status = Some(format!("focus failed: {e}"));
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => view.move_down(),
+                            KeyCode::Up | KeyCode::Char('k') => view.move_up(),
+                            KeyCode::Right | KeyCode::Char('l') => view.expand(),
+                            KeyCode::Left | KeyCode::Char('h') => view.collapse(),
+                            KeyCode::Char(' ') => view.toggle(),
+                            KeyCode::Char('x') => {
+                                // Arm a tmux-style yes/no confirmation.
+                                match view.selected_row().map(|r| r.kind) {
+                                    Some(RowKind::Pane { pane_id, .. }) => {
+                                        let name = view
+                                            .selected_row()
+                                            .map(|r| r.name)
+                                            .unwrap_or_else(|| pane_id.clone());
+                                        confirm_close = Some(pane_id);
+                                        status = Some(format!("kill pane \"{name}\"? (y/n)"));
+                                    }
+                                    _ => {
+                                        status = Some("select a pane to close".to_string());
+                                    }
+                                }
+                            }
+                            _ => {
+                                dirty = false;
+                            }
                         }
                     }
                 }
