@@ -5,10 +5,17 @@ min_herdr_version = "0.7.0"
 description = "A tmux Ctrl+b w style navigator with a live pane preview."
 platforms = ["linux", "macos", "windows"]
 
-# Built on `herdr plugin install`. Local `plugin link` does not run build
-# commands, so build the binary yourself with `cargo build --release`.
+# Hybrid build on `herdr plugin install`: try to download a prebuilt binary
+# (no Rust needed); if that fails (no release asset / offline / no shell tools),
+# fall back to a local `cargo build`. Local `plugin link` does not run build
+# commands, so build the binary yourself first when developing.
 [[build]]
-command = ["cargo", "build", "--release"]
+command = ["sh", "-c", "sh scripts/install-binary.sh || cargo build --release"]
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cmd", "/C", "bash scripts/install-binary.sh || cargo build --release"]
+platforms = ["windows"]
 
 # The navigator entrypoint. `popup` opens a session-modal terminal that does
 # NOT change the tab layout: it is not a herdr pane, carries no HERDR_PANE_ID,

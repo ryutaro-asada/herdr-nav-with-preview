@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 - Live preview of the selected pane, refreshed about once per second.
 - `Enter` focuses the selected pane and closes the navigator.
 - `n` creates a new workspace; `x` closes the selected pane (with confirmation).
-- Single self-contained Rust binary, built with `cargo build --release`.
+- Single self-contained Rust binary; installed from a prebuilt release (or built with `cargo build --release`).
 
 ## Keys
 
@@ -38,7 +38,9 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 ## Requirements
 
 - herdr `>= 0.7.0`
-- Rust toolchain (`cargo`) to build the plugin.
+- `herdr plugin install` downloads a prebuilt binary — no Rust toolchain needed.
+  A Rust toolchain (`cargo`) is only required to build from source when no
+  prebuilt binary is available for your platform.
 
 ## Install
 
@@ -81,8 +83,10 @@ uses `prefix+W` (shift) to avoid clobbering it. Pick any free chord you like.
   `herdr` on `PATH`. Make sure a herdr server is running.
 - **Empty tree** — open at least one workspace in herdr first.
 - **Pane won't launch** — the manifest runs `./target/release/herdr-nav-preview`
-  relative to the plugin root, so build the release binary before opening the
-  navigator (`herdr plugin install` does this for you via the `[[build]]` step).
+  relative to the plugin root. `herdr plugin install` puts a binary there for you
+  (downloading a prebuilt release, or building with `cargo` as a fallback). When
+  developing with `herdr plugin link`, build it yourself first with
+  `cargo build --release`.
 
 ## License
 
