@@ -89,25 +89,37 @@ fn status_color(status: Option<&str>) -> Color {
     }
 }
 
-/// A small status dot glyph; filled when the agent is active/needs attention.
+/// Status glyph, chosen to read like herdr's native agent indicators:
+/// working = half-filled (in progress), blocked = needs attention,
+/// done = finished check, idle = ready dot.
 fn status_glyph(status: Option<&str>) -> &'static str {
     match status {
-        Some("working") | Some("blocked") | Some("done") => "●",
-        Some("idle") => "○",
+        Some("working") => "◐",
+        Some("blocked") => "▲",
+        Some("done") => "✓",
+        Some("idle") => "●",
         _ => "·",
     }
 }
 
 /// Build a styled line for one tree row, herdr-navigator style:
-/// `▎ <tree-glyph> <status-dot> <name> [agent]`.
+/// `▎ <tree-glyph> <status-dot> <name> [agent]`. When selected, the whole row
+/// is filled with a solid highlight background across the full width.
 fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'static> {
     use crate::view::RowKind;
 
+    // Solid fill behind the selected row, like herdr's native cursor.
+    let sel_bg = Color::Rgb(68, 80, 120);
+    let base = |s: Style| if selected { s.bg(sel_bg) } else { s };
+
     let mut spans: Vec<Span<'static>> = Vec::new();
 
-    // Selection bar in the first column.
+    // Selection accent bar in the first column.
     if selected {
-        spans.push(Span::styled("▎", Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled(
+            "▏",
+            Style::default().fg(Color::Cyan).bg(sel_bg),
+        ));
     } else {
         spans.push(Span::raw(" "));
     }
@@ -117,32 +129,31 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         0 => {}
         1 => {
             let branch = if row.is_last { "└─ " } else { "├─ " };
-            spans.push(Span::styled(branch, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(branch, base(Style::default().fg(Color::DarkGray))));
         }
         _ => {
-            // Panes hang one level deeper than their tab.
-            spans.push(Span::styled("   ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled("   ", base(Style::default().fg(Color::DarkGray))));
             let branch = if row.is_last { "└─ " } else { "├─ " };
-            spans.push(Span::styled(branch, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(branch, base(Style::default().fg(Color::DarkGray))));
         }
     }
 
     // Expand/collapse caret for expandable nodes.
     if row.expandable {
         let caret = if row.expanded { "▾ " } else { "▸ " };
-        spans.push(Span::styled(caret, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(caret, base(Style::default().fg(Color::DarkGray))));
     }
 
-    // Agent status dot.
+    // Agent status dot (keeps its status color, even on the fill).
     let status = row.agent_status.as_deref();
     if !matches!(row.kind, RowKind::Workspace { .. }) || status.is_some() {
         spans.push(Span::styled(
             format!("{} ", status_glyph(status)),
-            Style::default().fg(status_color(status)),
+            base(Style::default().fg(status_color(status))),
         ));
     }
 
-    // The name. Workspaces bold; focused workspace cyan.
+    // The name. Workspaces bold; focused workspace cyan; selected white+bold.
     let mut name_style = Style::default();
     match row.kind {
         RowKind::Workspace { .. } => {
@@ -157,7 +168,7 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         RowKind::Pane { .. } => {}
     }
     if selected {
-        name_style = name_style.add_modifier(Modifier::BOLD);
+        name_style = name_style.fg(Color::White).add_modifier(Modifier::BOLD);
     }
 
     // Width already consumed by the prefix spans.
@@ -171,19 +182,24 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         .map(unicode_width::UnicodeWidthStr::width)
         .unwrap_or(0);
     let avail = width.saturating_sub(used);
-    // Truncate the name, leaving room for the agent badge when present.
     let name = truncate_display(&row.name, avail.saturating_sub(badge_w).max(1));
-    spans.push(Span::styled(name, name_style));
+    let name_w = unicode_width::UnicodeWidthStr::width(name.as_str());
+    spans.push(Span::styled(name, base(name_style)));
     if let Some(badge) = agent_badge {
-        spans.push(Span::styled(badge, Style::default().fg(Color::DarkGray)));
+        let badge_style = base(Style::default().fg(Color::Gray));
+        spans.push(Span::styled(badge, badge_style));
     }
 
-    // Whole-line background highlight for the selected row.
-    let mut line = Line::from(spans);
+    // Pad to full width so the highlight fill spans the whole row.
     if selected {
-        line = line.style(Style::default().bg(Color::Rgb(40, 44, 52)));
+        let drawn = used + name_w + badge_w;
+        let pad = width.saturating_sub(drawn);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(sel_bg)));
+        }
     }
-    line
+
+    Line::from(spans)
 }
 
 /// Truncate `s` so its display width fits in `max_width` columns, appending an
