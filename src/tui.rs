@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -398,6 +398,15 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                             KeyCode::Backspace => view.pop_query_char(),
                             KeyCode::Down => view.move_down(),
                             KeyCode::Up => view.move_up(),
+                            // Ctrl+n / Ctrl+p move within results (fzf-style).
+                            // Must be handled before the plain Char arm so the
+                            // letters don't get typed into the query.
+                            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                view.move_down()
+                            }
+                            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                view.move_up()
+                            }
                             KeyCode::Char(c) => view.push_query_char(c),
                             _ => {}
                         }
