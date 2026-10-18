@@ -1,6 +1,6 @@
 id = "ryutaroasada.nav-with-preview"
 name = "Nav with Preview"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.7.0"
 description = "A tmux Ctrl+b w style navigator with a live pane preview."
 platforms = ["linux", "macos", "windows"]
