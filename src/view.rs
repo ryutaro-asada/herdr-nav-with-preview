@@ -389,11 +389,16 @@ impl TreeView {
         for (wi, w) in self.tree.workspaces.iter().enumerate() {
             let wkey = ws_key(&w.workspace_id);
             let w_collapsed = honor_collapse && self.is_collapsed(&wkey);
-            // Workspace name: "number  label" with a clean fallback.
+            // Workspace name: "number  label" with a clean fallback, plus the
+            // git branch in parentheses when the workspace cwd is a repo.
             let label = if w.label.trim().is_empty() {
                 w.workspace_id.clone()
             } else {
                 w.label.clone()
+            };
+            let label = match &w.branch {
+                Some(b) if !b.is_empty() => format!("{label} ({b})"),
+                _ => label,
             };
             let name = if w.number > 0 {
                 format!("{}  {}", w.number, label)
@@ -930,5 +935,24 @@ mod tests {
         assert!(row_matches_query(pane_claude, "w1:p2")); // id match
         assert!(!row_matches_query(pane_claude, "nope"));
         assert!(row_matches_query(pane_claude, "")); // empty matches
+    }
+
+    #[test]
+    fn workspace_name_includes_branch_when_present() {
+        let mut tree = sample_tree();
+        tree.workspaces[0].branch = Some("feature/foo".to_string());
+        let view = TreeView::new(tree);
+        let rows = view.rows();
+        // Workspace row name: "1  proj (feature/foo)".
+        assert!(rows[0].name.contains("proj (feature/foo)"), "got {:?}", rows[0].name);
+    }
+
+    #[test]
+    fn workspace_name_without_branch_is_plain() {
+        // sample_tree has branch=None, so no parentheses are added.
+        let view = TreeView::new(sample_tree());
+        let rows = view.rows();
+        assert!(rows[0].name.contains("proj"));
+        assert!(!rows[0].name.contains('('), "got {:?}", rows[0].name);
     }
 }

@@ -32,6 +32,11 @@ pub struct WorkspaceNode {
     pub number: u32,
     pub focused: bool,
     pub agent_status: Option<String>,
+    /// cwd of the workspace's representative (first) pane, used to resolve the
+    /// git branch and the new-workspace default name.
+    pub cwd: Option<String>,
+    /// Git branch of `cwd`, resolved once after build; `None` outside a repo.
+    pub branch: Option<String>,
     pub tabs: Vec<TabNode>,
 }
 
@@ -93,13 +98,20 @@ impl Tree {
                             panes: pane_nodes,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<TabNode>>();
+                // Representative cwd: the first pane of the first tab.
+                let cwd = tab_nodes
+                    .first()
+                    .and_then(|t| t.panes.first())
+                    .and_then(|p| p.cwd.clone());
                 WorkspaceNode {
                     workspace_id: w.workspace_id.clone(),
                     label: w.label.clone(),
                     number: w.number,
                     focused: w.focused,
                     agent_status: w.agent_status.clone(),
+                    cwd,
+                    branch: None,
                     tabs: tab_nodes,
                 }
             })
@@ -113,6 +125,18 @@ impl Tree {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.workspaces.is_empty()
+    }
+
+    /// Resolve each workspace's git branch from its cwd (one git call per
+    /// workspace). Call once after building; `rows()` then renders the cached
+    /// branch without any further git invocations.
+    pub fn resolve_branches(&mut self) {
+        for w in &mut self.workspaces {
+            w.branch = w
+                .cwd
+                .as_deref()
+                .and_then(crate::herdr_client::git_branch);
+        }
     }
 
     /// The default label for a new workspace: one past the highest existing
@@ -148,10 +172,14 @@ impl Tree {
     pub fn to_indented_text(&self) -> String {
         let mut out = String::new();
         for w in &self.workspaces {
+            let label = match &w.branch {
+                Some(b) if !b.is_empty() => format!("{} ({})", w.label, b),
+                _ => w.label.clone(),
+            };
             out.push_str(&format!(
                 "{} [{}]{}\n",
                 w.workspace_id,
-                w.label,
+                label,
                 if w.focused { " *" } else { "" }
             ));
             for t in &w.tabs {
