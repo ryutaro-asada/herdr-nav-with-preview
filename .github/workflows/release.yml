@@ -11,8 +11,11 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-14
+          # Cross-built on the arm64 macOS runner. The dedicated Intel runner
+          # (macos-13) is often stuck queued for a long time; macos-14 is
+          # readily available and Apple's toolchain cross-compiles x86_64 fine.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
