@@ -82,12 +82,14 @@ fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
     let workspaces = load_or_hint(|| api.workspaces())?;
     let tabs = load_or_hint(|| api.tabs())?;
     let panes = load_or_hint(|| api.panes())?;
-    Ok(Tree::build(
+    let mut tree = Tree::build(
         workspaces,
         tabs,
         panes,
         herdr_client::own_pane_id().as_deref(),
-    ))
+    );
+    tree.resolve_branches();
+    Ok(tree)
 }
 
 /// Wrap a herdr call with a clear hint when the binary itself can't be found or

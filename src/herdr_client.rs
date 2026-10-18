@@ -24,6 +24,25 @@ pub fn herdr_bin() -> String {
     std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
 }
 
+/// Current git branch for a directory, or `None` when it is not a git repo,
+/// git is unavailable, or HEAD is detached. Uses `git -C <cwd> rev-parse
+/// --abbrev-ref HEAD`; a detached HEAD reports `HEAD`, which we treat as none.
+pub fn git_branch(cwd: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
 /// The navigator's own overlay pane id, if launched as a plugin pane. herdr
 /// sets `HERDR_PANE_ID` to the running pane; we exclude it from the tree so the
 /// navigator doesn't list itself. Popups are not panes and have no

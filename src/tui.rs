@@ -89,12 +89,14 @@ fn selected_pane_id(view: &TreeView) -> Option<String> {
 
 /// Rebuild the workspace > tab > pane tree from the live herdr state.
 fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
-    Ok(Tree::build(
+    let mut tree = Tree::build(
         api.workspaces()?,
         api.tabs()?,
         api.panes()?,
         crate::herdr_client::own_pane_id().as_deref(),
-    ))
+    );
+    tree.resolve_branches();
+    Ok(tree)
 }
 
 /// Rebuild the tree right after closing `closed_pane`, filtering out both the
@@ -104,12 +106,14 @@ fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
 fn build_tree_excluding(api: &dyn HerdrApi, closed_pane: &str) -> Result<Tree> {
     let mut panes = api.panes()?;
     panes.retain(|p| p.pane_id != closed_pane);
-    Ok(Tree::build(
+    let mut tree = Tree::build(
         api.workspaces()?,
         api.tabs()?,
         panes,
         crate::herdr_client::own_pane_id().as_deref(),
-    ))
+    );
+    tree.resolve_branches();
+    Ok(tree)
 }
 
 /// Color for an agent status, matching herdr's semantics.
@@ -593,7 +597,15 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 });
                                 let default = cwd
                                     .as_deref()
-                                    .map(project_name)
+                                    .map(|c| {
+                                        let name = project_name(c);
+                                        // Include the git branch when `c` is a
+                                        // repo: "name (branch)".
+                                        match crate::herdr_client::git_branch(c) {
+                                            Some(b) if !name.is_empty() => format!("{name} ({b})"),
+                                            _ => name,
+                                        }
+                                    })
                                     .filter(|s| !s.is_empty())
                                     .unwrap_or_else(|| {
                                         view.tree().next_workspace_number().to_string()
