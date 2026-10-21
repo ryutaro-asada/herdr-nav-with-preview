@@ -1,4 +1,5 @@
 mod herdr_client;
+mod dirs;
 mod poller;
 mod tree;
 mod tui;
