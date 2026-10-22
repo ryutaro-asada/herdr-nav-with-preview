@@ -40,23 +40,26 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 
 ## New-workspace directory picker
 
-`N` opens an fzf-style picker. Type to fuzzy-filter; results are ranked
-(contiguous matches, word boundaries and the directory basename score higher)
-and matched characters are highlighted. Space-separated terms must all match
-(`tmp1 sptv`). Keys: `↑`/`↓` or `Ctrl+n`/`Ctrl+p` (`Ctrl+j`/`Ctrl+k`) move,
-`Ctrl+u` clears, `Enter` chooses, `Esc`/`Ctrl+c` cancels.
+`N` opens an fzf-style picker. Matching uses
+[nucleo-matcher](https://crates.io/crates/nucleo-matcher) (the fzf algorithm
+as used by the Helix editor) with path-aware scoring, smart case, and fzf query
+syntax: space-separated terms must all match (`tmp1 sptv`), `^prefix`,
+`suffix$`, `'exact`, `!exclude`. Matched characters are highlighted.
+Keys: `↑`/`↓` or `Ctrl+n`/`Ctrl+p` (`Ctrl+j`/`Ctrl+k`) move, `Ctrl+u` clears,
+`Enter` chooses, `Esc`/`Ctrl+c` cancels.
 
 Candidates, in order: the selected pane's cwd, cwds of all open panes,
 [zoxide](https://github.com/ajeetdsouza/zoxide) history (if installed),
-siblings of open cwds, and directories found under the scan roots (default
-`~/repos ~/src ~/work ~/dev ~/projects ~/code ~/go/src ~/ghq`, depth 2; hidden
-dirs and `node_modules`/`target`/etc. are skipped, git repos are not descended
-into). Override the roots in `config.toml` in the plugin config directory
-(`$HERDR_PLUGIN_CONFIG_DIR`):
+siblings of open cwds, and every directory under the scan roots (default `~`,
+depth 5), walked with the [ignore](https://crates.io/crates/ignore) crate
+(ripgrep's walker) — similar to `fd -t d`. Hidden and `.gitignore`d dirs,
+`node_modules`/`target`/`vendor`/`dist`/`build`, and `~/Library` and the other
+macOS media folders are skipped. Override in `config.toml` in the plugin config
+directory (`$HERDR_PLUGIN_CONFIG_DIR`):
 
 ```toml
 roots = ["~/repos", "~/job"]
-depth = 3
+depth = 6
 ```
 
 ## Requirements
