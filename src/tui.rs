@@ -1090,6 +1090,17 @@ pub fn draw(
 mod tests {
     use super::truncate_display;
     use super::project_name;
+    use super::unique_label;
+
+    #[test]
+    fn unique_label_increments_on_collision() {
+        assert_eq!(unique_label("api", &[]), "api");
+        assert_eq!(unique_label("api", &["web", "api-2"]), "api");
+        assert_eq!(unique_label("api", &["api"]), "api-2");
+        assert_eq!(unique_label("api", &["api", "api-2"]), "api-3");
+        // Fills the first gap.
+        assert_eq!(unique_label("api", &["api", "api-3"]), "api-2");
+    }
 
     #[test]
     fn project_name_is_basename() {
