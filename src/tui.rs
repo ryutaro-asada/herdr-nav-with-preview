@@ -140,6 +140,16 @@ fn status_glyph(status: Option<&str>) -> &'static str {
     }
 }
 
+/// Per-kind color: workspace blue, tab purple, pane peach. Chosen to stay
+/// distinct from the agent-status dot colors (yellow/red/green/cyan).
+fn kind_color(kind: &RowKind) -> Color {
+    match kind {
+        RowKind::Workspace { .. } => Color::Rgb(130, 170, 255),
+        RowKind::Tab { .. } => Color::Rgb(198, 160, 246),
+        RowKind::Pane { .. } => Color::Rgb(245, 169, 127),
+    }
+}
+
 /// Build a styled line for one tree row, herdr-navigator style:
 /// `▎ <tree-glyph> <status-dot> <name> [agent]`. When selected, the whole row
 /// is filled with a solid highlight background across the full width.
@@ -189,11 +199,13 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         spans.push(Span::styled(caret, base(Style::default().fg(Color::DarkGray))));
     }
 
-    // Kind icon so sessions, tabs, and panes are distinguishable at a glance.
-    let (kind_icon, kind_color) = match row.kind {
-        RowKind::Workspace { .. } => ("◆ ", Color::Cyan),
-        RowKind::Tab { .. } => ("▪ ", Color::Gray),
-        RowKind::Pane { .. } => ("› ", Color::DarkGray),
+    // Kind icon so workspaces, tabs, and panes are distinguishable at a glance;
+    // icon and name share the kind's color.
+    let kind_color = kind_color(&row.kind);
+    let kind_icon = match row.kind {
+        RowKind::Workspace { .. } => "◆ ",
+        RowKind::Tab { .. } => "▪ ",
+        RowKind::Pane { .. } => "› ",
     };
     spans.push(Span::styled(kind_icon, base(Style::default().fg(kind_color))));
 
@@ -207,19 +219,14 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         ));
     }
 
-    // The name. Workspaces bold; focused workspace cyan; selected white+bold.
-    let mut name_style = Style::default();
-    match row.kind {
-        RowKind::Workspace { .. } => {
-            name_style = name_style.add_modifier(Modifier::BOLD);
-            if row.focused {
-                name_style = name_style.fg(Color::Cyan);
-            }
+    // The name, in the kind's color. Workspaces bold; the focused workspace is
+    // also underlined; the selected row is white+bold for contrast on the fill.
+    let mut name_style = Style::default().fg(kind_color);
+    if let RowKind::Workspace { .. } = row.kind {
+        name_style = name_style.add_modifier(Modifier::BOLD);
+        if row.focused {
+            name_style = name_style.add_modifier(Modifier::UNDERLINED);
         }
-        RowKind::Tab { .. } => {
-            name_style = name_style.fg(Color::Gray);
-        }
-        RowKind::Pane { .. } => {}
     }
     if selected {
         name_style = name_style.fg(Color::White).add_modifier(Modifier::BOLD);
