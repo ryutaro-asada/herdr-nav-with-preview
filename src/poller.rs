@@ -193,6 +193,68 @@ impl Drop for Poller {
     }
 }
 
+/// Interval for re-reading the workspace/tab/pane tree (agent statuses,
+/// added/removed panes). Each poll is three `herdr ... list` calls plus one
+/// `git rev-parse` per workspace, all off the UI thread.
+pub const TREE_POLL_INTERVAL: Duration = Duration::from_millis(2000);
+
+/// Background worker that rebuilds the tree every `TREE_POLL_INTERVAL` via
+/// `build` and sends it to the UI (which skips redraws when nothing changed).
+pub struct TreePoller {
+    pub updates: Receiver<crate::tree::Tree>,
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TreePoller {
+    pub fn spawn<F>(mut build: F) -> Self
+    where
+        F: FnMut() -> Option<crate::tree::Tree> + Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let (lock, cvar) = &*thread_stop;
+            loop {
+                // Sleep first: the UI already built the initial tree.
+                let guard = lock.lock().unwrap();
+                let (guard, _) = cvar
+                    .wait_timeout_while(guard, TREE_POLL_INTERVAL, |stopped| !*stopped)
+                    .unwrap();
+                if *guard {
+                    break;
+                }
+                drop(guard);
+                // Always send: the UI compares with its current tree (and may
+                // skip one right after a local change), so de-duping here
+                // could leave it stale.
+                if let Some(tree) = build() {
+                    if tx.send(tree).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            updates: rx,
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for TreePoller {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.stop;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

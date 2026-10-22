@@ -20,8 +20,11 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 
 - Collapsible `workspace > tab > pane` tree with per-kind icons and agent status:
   working agents get an animated spinner (also on their tab and workspace, so it
-  shows when collapsed) and a `working` / `blocked` / `done` chip, and the tree
-  title sums up activity across all panes.
+  shows when collapsed), and the tree title sums up activity across all panes.
+- Agent pane rows get a status chip: `working` (yellow), `waiting` (red — the
+  agent needs your input), `complete` (cyan — finished, not yet viewed), `idle`.
+- The tree (statuses, added/closed panes) refreshes every 2 seconds in the
+  background while the navigator is open.
 - Incremental search (`/`) to filter the tree by name, agent, or id.
 - Live preview of the selected pane, refreshed about once per second.
 - `Enter` focuses the selected pane and closes the navigator.

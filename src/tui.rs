@@ -152,16 +152,35 @@ fn is_notable_status(status: Option<&str>) -> bool {
     matches!(status, Some("working" | "blocked" | "done"))
 }
 
-/// Filled status chip for pane rows: ` working ` on yellow, ` blocked ` on
-/// red, ` done ` on cyan. `None` for idle/unknown (kept quiet).
-fn status_chip(status: Option<&str>) -> Option<(&'static str, Style)> {
-    let (text, fg, bg) = match status {
-        Some("working") => (" working ", Color::Black, Color::Yellow),
-        Some("blocked") => (" blocked ", Color::White, Color::Red),
-        Some("done") => (" done ", Color::Black, Color::Cyan),
-        _ => return None,
+/// Human-facing word for a herdr agent status: `blocked` (needs your input
+/// or permission) reads as "waiting", `done` (finished, not yet looked at) as
+/// "complete". `None` for unknown/no agent.
+fn status_word(status: Option<&str>) -> Option<&'static str> {
+    match status {
+        Some("working") => Some("working"),
+        Some("blocked") => Some("waiting"),
+        Some("done") => Some("complete"),
+        Some("idle") => Some("idle"),
+        _ => None,
+    }
+}
+
+/// Filled status chip for agent pane rows: working (yellow), waiting (red,
+/// needs you), complete (cyan), idle (muted gray). `None` without an agent.
+fn status_chip(status: Option<&str>) -> Option<(String, Style)> {
+    let word = status_word(status)?;
+    let style = match status {
+        Some("working") => Style::default().fg(Color::Black).bg(Color::Yellow),
+        Some("blocked") => Style::default().fg(Color::White).bg(Color::Red),
+        Some("done") => Style::default().fg(Color::Black).bg(Color::Cyan),
+        _ => Style::default().fg(Color::Gray).bg(Color::Rgb(60, 60, 70)),
     };
-    Some((text, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)))
+    let style = if status == Some("idle") {
+        style
+    } else {
+        style.add_modifier(Modifier::BOLD)
+    };
+    Some((format!(" {word} "), style))
 }
 
 /// Counts of panes per notable status, for the tree title summary:
@@ -285,7 +304,8 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
     // Right-aligned status chip on pane rows (working/blocked/done).
     let chip = if is_pane { status_chip(status) } else { None };
     let chip_w = chip
-        .map(|(t, _)| unicode_width::UnicodeWidthStr::width(t) + 1)
+        .as_ref()
+        .map(|(t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()) + 1)
         .unwrap_or(0);
     let avail = width.saturating_sub(used);
     let name = truncate_display(
@@ -633,6 +653,15 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
         generation,
         pane_id: current_pane.clone(),
     });
+    // Periodic tree refresh so agent statuses (and added/closed panes) stay
+    // live while the navigator is open.
+    let tree_poller = crate::poller::TreePoller::spawn(|| {
+        build_tree(&crate::herdr_client::CliHerdr::new()).ok()
+    });
+    // After we mutate the tree ourselves (create/close), ignore polled trees
+    // for a moment: one built just before the change could resurrect a closed
+    // pane or drop a just-created one.
+    let mut tree_hold_until = std::time::Instant::now();
 
     // Only redraw when something actually changed. This keeps key handling
     // snappy and avoids re-flattening the tree / re-parsing ANSI every tick.
@@ -752,6 +781,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                                 view.select_for_launch(Some(&new_id), None, None);
                                                 scroll = 0;
                                                 current_pane = None;
+                                                tree_hold_until = hold_after_mutation();
                                             }
                                             Err(e) => {
                                                 status = Some(format!("create failed: {e}"));
@@ -776,6 +806,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                                     None,
                                                 );
                                                 current_pane = None;
+                                                tree_hold_until = hold_after_mutation();
                                             }
                                             Err(e) => {
                                                 status = Some(format!("add tab failed: {e}"));
@@ -817,6 +848,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         }
                                         scroll = 0;
                                         current_pane = None;
+                                        tree_hold_until = hold_after_mutation();
                                         // When running as an overlay *pane*, herdr
                                         // may move focus within our home workspace
                                         // on close, so we re-assert the user's
@@ -1004,6 +1036,19 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             }
         }
 
+        // Apply the latest polled tree (statuses etc.), keeping the selection
+        // on the same node. The preview retargeting below handles the case
+        // where the selected pane vanished.
+        let mut latest = None;
+        while let Ok(tree) = tree_poller.updates.try_recv() {
+            latest = Some(tree);
+        }
+        if let Some(tree) = latest {
+            if std::time::Instant::now() >= tree_hold_until && view.refresh_tree(tree) {
+                dirty = true;
+            }
+        }
+
         // On selection change, bump the generation, clear the stale preview,
         // and retarget the poller.
         let new_pane = selected_pane_id(view);
@@ -1031,20 +1076,23 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     }
 }
 
+/// Deadline until which polled trees are ignored after a local create/close.
+fn hold_after_mutation() -> std::time::Instant {
+    std::time::Instant::now() + crate::poller::TREE_POLL_INTERVAL + Duration::from_millis(1000)
+}
+
 /// Tree block title: ` spaces ` plus a summary of agent activity across all
-/// panes, e.g. ` ⠋ 2 working  ▲ 1 blocked  ✓ 1 done `. Zero counts are hidden.
+/// panes, e.g. ` ⠋ 2 working  ▲ 1 waiting  ✓ 1 complete `. Zero counts are
+/// hidden.
 fn tree_title(counts: (usize, usize, usize), tick: usize) -> Line<'static> {
     let mut spans = vec![Span::styled(
         " spaces ",
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     )];
     let (working, blocked, done) = counts;
-    for (n, status, word) in [
-        (working, "working", "working"),
-        (blocked, "blocked", "blocked"),
-        (done, "done", "done"),
-    ] {
+    for (n, status) in [(working, "working"), (blocked, "blocked"), (done, "done")] {
         if n > 0 {
+            let word = status_word(Some(status)).unwrap_or(status);
             spans.push(Span::styled(
                 format!(" {} {n} {word} ", status_glyph(Some(status), tick)),
                 Style::default()
@@ -1158,6 +1206,18 @@ pub fn draw(
 mod tests {
     use super::truncate_display;
     use super::project_name;
+    use super::{status_chip, status_word};
+
+    #[test]
+    fn status_words_read_naturally() {
+        assert_eq!(status_word(Some("working")), Some("working"));
+        assert_eq!(status_word(Some("blocked")), Some("waiting"));
+        assert_eq!(status_word(Some("done")), Some("complete"));
+        assert_eq!(status_word(Some("idle")), Some("idle"));
+        assert_eq!(status_word(Some("unknown")), None);
+        assert!(status_chip(None).is_none());
+        assert_eq!(status_chip(Some("done")).unwrap().0, " complete ");
+    }
 
     #[test]
     fn project_name_is_basename() {
