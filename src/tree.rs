@@ -40,6 +40,38 @@ pub struct WorkspaceNode {
     pub tabs: Vec<TabNode>,
 }
 
+/// Sort key that puts similarly named workspaces next to each other: the
+/// label lowercased, with trailing ` (branch)` suffixes and a trailing
+/// `-N` / ` N` counter removed. `sptv-video`, `sptv-video-2` and
+/// `sptv-video (develop)` all map to `sptv-video`. Falls back to the id for an
+/// empty label. Pure.
+pub fn workspace_group_key(label: &str, workspace_id: &str) -> String {
+    let mut s = label.trim().to_lowercase();
+    // Strip trailing "(...)" groups, e.g. "name (feat/x) (develop)".
+    while s.ends_with(')') {
+        match s.rfind(" (") {
+            Some(i) => s.truncate(i),
+            None => break,
+        }
+        s = s.trim_end().to_string();
+    }
+    // Strip a trailing counter: "name-2", "name 3" (not a bare number).
+    let digits = s.len() - s.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    if digits > 0 && digits < s.len() {
+        let head = &s[..s.len() - digits];
+        if let Some(stripped) = head.strip_suffix('-').or_else(|| head.strip_suffix(' ')) {
+            if !stripped.is_empty() {
+                s = stripped.to_string();
+            }
+        }
+    }
+    if s.is_empty() {
+        workspace_id.to_lowercase()
+    } else {
+        s
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tree {
     pub workspaces: Vec<WorkspaceNode>,
@@ -47,8 +79,9 @@ pub struct Tree {
 
 impl Tree {
     /// Assemble a tree from the three flat lists. Panes are matched to tabs by
-    /// `tab_id`; tabs are matched to workspaces by `workspace_id`. Entries are
-    /// sorted by their id for stable display order. `exclude_pane` drops one
+    /// `tab_id`; tabs are matched to workspaces by `workspace_id`. Tabs and
+    /// panes are sorted by id; workspaces are grouped by similar name (see
+    /// `workspace_group_key`). `exclude_pane` drops one
     /// pane from the tree — used to hide the navigator's own overlay pane so it
     /// doesn't show up as a stray `wN:pM` row.
     pub fn build(
@@ -66,8 +99,17 @@ impl Tree {
         let mut tabs = tabs;
         tabs.sort_by(|a, b| a.tab_id.cmp(&b.tab_id));
 
+        // Group similarly named workspaces together ("api", "api-2",
+        // "api (main)" sit next to each other), groups alphabetically, then
+        // by herdr's workspace number within a group.
         let mut workspaces = workspaces;
-        workspaces.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+        workspaces.sort_by(|a, b| {
+            let ka = workspace_group_key(&a.label, &a.workspace_id);
+            let kb = workspace_group_key(&b.label, &b.workspace_id);
+            ka.cmp(&kb)
+                .then(a.number.cmp(&b.number))
+                .then(a.workspace_id.cmp(&b.workspace_id))
+        });
 
         let ws_nodes = workspaces
             .into_iter()
@@ -338,5 +380,41 @@ mod tests {
         assert!(text.contains("w1 [proj] *"));
         assert!(text.contains("  w1:t1 (main)"));
         assert!(text.contains("    w1:p1 shell"));
+    }
+
+    #[test]
+    fn group_key_strips_branch_suffix_and_counter() {
+        assert_eq!(workspace_group_key("sptv-video", "w1"), "sptv-video");
+        assert_eq!(workspace_group_key("sptv-video-2", "w1"), "sptv-video");
+        assert_eq!(workspace_group_key("sptv-video (develop)", "w1"), "sptv-video");
+        assert_eq!(
+            workspace_group_key("sptv-video (chore/x) (develop)", "w1"),
+            "sptv-video"
+        );
+        assert_eq!(workspace_group_key("Memo 3", "w1"), "memo");
+        // Numbers that are the whole name or part of it are kept.
+        assert_eq!(workspace_group_key("12", "w1"), "12");
+        assert_eq!(workspace_group_key("app2", "w1"), "app2");
+        assert_eq!(workspace_group_key("", "wX"), "wx");
+    }
+
+    #[test]
+    fn similar_workspaces_are_grouped_then_ordered_by_number() {
+        let mut a = ws("w1", "sptv-video", false);
+        a.number = 1;
+        let mut b = ws("w2", "memo", false);
+        b.number = 2;
+        let mut c = ws("w3", "sptv-video (develop)", false);
+        c.number = 3;
+        let mut d = ws("w4", "memo-2", false);
+        d.number = 4;
+        let mut e = ws("w5", "api", false);
+        e.number = 5;
+        let tree = Tree::build(vec![a, b, c, d, e], vec![], vec![], None);
+        let labels: Vec<&str> = tree.workspaces.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["api", "memo", "memo-2", "sptv-video", "sptv-video (develop)"]
+        );
     }
 }
