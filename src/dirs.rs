@@ -5,23 +5,21 @@
 //!   1. the currently-selected pane's cwd (so "here" is always first),
 //!   2. the cwds of every open pane (projects you already work in),
 //!   3. `zoxide query -l` if zoxide is installed,
-//!   4. sibling directories of the open cwds (e.g. other projects next to an
-//!      open one),
-//!   5. directories under configured roots, scanned up to `depth` levels
-//!      (descending stops at git repositories).
+//!   4. sibling directories of the open cwds,
+//!   5. every directory under the scan roots (default: `$HOME`), walked up to
+//!      `depth` levels with the `ignore` crate (hidden, `.gitignore`d and
+//!      build/dependency dirs skipped) — like fzf's `Alt-C` / `fd -t d`.
 //!
 //! Config lives at `<HERDR_PLUGIN_CONFIG_DIR>/config.toml`:
 //! ```toml
-//! [new_workspace]
-//! roots = ["~/repos", "~/job"]   # optional; overrides the default roots
-//! depth = 2                      # optional; scan depth under each root
+//! roots = ["~/repos", "~/job"]   # optional; overrides the default (~)
+//! depth = 5                      # optional; walk depth under each root
 //! ```
 //!
-//! Matching is fzf-style: every query character must appear in order
-//! (case-insensitive), and results are ranked by a score that rewards
-//! consecutive characters, word boundaries, and matches in the last path
-//! segment. Space-separated terms must all match. Paths are matched in their
-//! `~`-abbreviated form so the home prefix doesn't produce noise matches.
+//! Matching and scoring use `nucleo-matcher` (fzf's algorithm, as used by the
+//! Helix editor) with path-aware bonuses and fzf query syntax. Paths are
+//! matched in their `~`-abbreviated form so the home prefix doesn't produce
+//! noise matches.
 //!
 //! The pure helpers are unit tested; filesystem/zoxide/config reads are thin
 //! wrappers.
@@ -31,18 +29,22 @@ use std::path::{Path, PathBuf};
 
 /// Default roots probed when no config is present. Only existing ones are
 /// scanned.
-const DEFAULT_ROOTS: &[&str] = &[
-    "~/repos", "~/src", "~/work", "~/dev", "~/projects", "~/code", "~/go/src", "~/ghq",
-];
+const DEFAULT_ROOTS: &[&str] = &["~"];
 
 /// Default scan depth under each root (children = 1, grandchildren = 2).
-const DEFAULT_DEPTH: usize = 2;
+const DEFAULT_DEPTH: usize = 5;
 
 /// Upper bound on scanned directories, to keep the picker responsive.
-const MAX_SCANNED: usize = 5000;
+const MAX_SCANNED: usize = 50_000;
 
 /// Directory names never descended into or listed.
-const SKIP_NAMES: &[&str] = &["node_modules", "target", "Library", "vendor", "dist", "build"];
+const SKIP_NAMES: &[&str] = &["node_modules", "target", "vendor", "dist", "build", "__pycache__"];
+
+/// Directory names skipped only directly under `$HOME` (system/media folders
+/// that are never project roots, and that macOS guards with privacy prompts).
+const SKIP_HOME_CHILDREN: &[&str] = &[
+    "Library", "Applications", "Movies", "Music", "Pictures", "Public",
+];
 
 /// Expand a leading `~` / `~/` to the user's home directory. Other paths are
 /// returned unchanged. Pure given `home`.
@@ -130,127 +132,40 @@ pub fn order_candidates(current: Option<&str>, others: &[String]) -> Vec<String>
     out
 }
 
-// --- fuzzy scoring ---------------------------------------------------------
+// --- fuzzy ranking (nucleo-matcher) ----------------------------------------
 
-const SCORE_MATCH: i64 = 16;
-const BONUS_CONSECUTIVE: i64 = 18;
-const BONUS_BOUNDARY: i64 = 12;
-const BONUS_BASENAME: i64 = 10;
-const BONUS_BASENAME_START: i64 = 15;
-const PENALTY_GAP_MAX: i64 = 8;
+/// Highlight positions are computed only for this many top results (the
+/// visible list is never taller), keeping each keystroke cheap on large lists.
+const HIGHLIGHT_LIMIT: usize = 500;
 
-fn is_boundary(prev: char) -> bool {
-    matches!(prev, '/' | '-' | '_' | '.' | ' ')
+fn new_matcher() -> nucleo_matcher::Matcher {
+    nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT.match_paths())
 }
 
-/// Score a set of matched char positions within `hay`.
-fn score_positions(hay: &[char], pos: &[usize], base_start: usize) -> i64 {
-    let mut score = 0;
-    for (k, &i) in pos.iter().enumerate() {
-        score += SCORE_MATCH;
-        if i == 0 || is_boundary(hay[i - 1]) {
-            score += BONUS_BOUNDARY;
-        } else if hay[i - 1].is_lowercase() && hay[i].is_uppercase() {
-            score += BONUS_BOUNDARY / 2;
-        }
-        if i >= base_start {
-            score += BONUS_BASENAME;
-        }
-        if k == 0 && i == base_start {
-            score += BONUS_BASENAME_START;
-        }
-        if k > 0 {
-            let gap = (i - pos[k - 1] - 1) as i64;
-            if gap == 0 {
-                score += BONUS_CONSECUTIVE;
-            } else {
-                score -= gap.min(PENALTY_GAP_MAX);
-            }
-        }
-    }
-    score
+fn parse_pattern(query: &str) -> nucleo_matcher::pattern::Pattern {
+    use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+    Pattern::parse(query, CaseMatching::Smart, Normalization::Smart)
 }
 
-/// Best-scoring match of one query term in `hay`, as (score, positions).
-fn score_term(hay: &[char], lower: &[char], term: &[char], base_start: usize) -> Option<(i64, Vec<usize>)> {
-    if term.is_empty() {
-        return Some((0, Vec::new()));
-    }
-    let n = lower.len();
-    let m = term.len();
-    let mut best: Option<(i64, Vec<usize>)> = None;
-    let consider = |pos: Vec<usize>, best: &mut Option<(i64, Vec<usize>)>| {
-        let s = score_positions(hay, &pos, base_start);
-        if best.as_ref().map_or(true, |(b, _)| s > *b) {
-            *best = Some((s, pos));
-        }
-    };
-    // Contiguous occurrences (strongest signal).
-    if m <= n {
-        for start in 0..=n - m {
-            if lower[start..start + m] == *term {
-                consider((start..start + m).collect(), &mut best);
-            }
-        }
-    }
-    // Subsequence matches, greedy forward from every possible start.
-    for start in 0..n {
-        if lower[start] != term[0] {
-            continue;
-        }
-        let mut pos = vec![start];
-        let mut j = 1;
-        let mut i = start + 1;
-        while j < m && i < n {
-            if lower[i] == term[j] {
-                pos.push(i);
-                j += 1;
-            }
-            i += 1;
-        }
-        if j < m {
-            // A later start can only match a subset; stop.
-            break;
-        }
-        consider(pos, &mut best);
-    }
-    best
-}
-
-/// fzf-style fuzzy score of `hay` against `query`. Space-separated terms must
-/// all match (case-insensitive subsequence). Returns `(score, matched char
-/// positions)`, or `None` when it doesn't match. Empty query matches with
-/// score 0. Pure.
+/// fzf-style fuzzy score of `hay` against `query`, using nucleo-matcher (the
+/// fzf algorithm port used by the Helix editor). Supports fzf query syntax:
+/// space-separated terms (all must match), `'exact`, `^prefix`, `suffix$`,
+/// `!negation`; smart case. Returns `(score, sorted matched char positions)`,
+/// or `None` when it doesn't match. Empty query matches with score 0. Pure.
+#[cfg(test)]
 pub fn fuzzy_score(hay: &str, query: &str) -> Option<(i64, Vec<usize>)> {
-    let terms: Vec<Vec<char>> = query
-        .split_whitespace()
-        .map(|t| t.to_lowercase().chars().collect())
-        .collect();
-    if terms.is_empty() {
-        return Some((0, Vec::new()));
-    }
-    let chars: Vec<char> = hay.chars().collect();
-    let lower: Vec<char> = hay.to_lowercase().chars().collect();
-    if lower.len() != chars.len() {
-        // Lowercasing changed the length (rare Unicode); fall back to a simple
-        // check on the lowered string so positions stay consistent.
-        return fuzzy_score(&hay.to_lowercase(), query);
-    }
-    let trimmed_len = chars.iter().rposition(|&c| c != '/').map_or(0, |i| i + 1);
-    let base_start = chars[..trimmed_len]
-        .iter()
-        .rposition(|&c| c == '/')
-        .map_or(0, |i| i + 1);
-    let mut total = 0;
-    let mut positions: Vec<usize> = Vec::new();
-    for term in &terms {
-        let (s, p) = score_term(&chars, &lower, term, base_start)?;
-        total += s;
-        positions.extend(p);
-    }
-    positions.sort_unstable();
-    positions.dedup();
-    Some((total, positions))
+    let pattern = parse_pattern(query);
+    let mut matcher = new_matcher();
+    let mut buf = Vec::new();
+    let mut idx: Vec<u32> = Vec::new();
+    let score = pattern.indices(
+        nucleo_matcher::Utf32Str::new(hay, &mut buf),
+        &mut matcher,
+        &mut idx,
+    )?;
+    idx.sort_unstable();
+    idx.dedup();
+    Some((score as i64, idx.into_iter().map(|i| i as usize).collect()))
 }
 
 /// Does `hay` fuzzy-match `query`? Pure.
@@ -260,7 +175,7 @@ pub fn fuzzy_match(hay: &str, query: &str) -> bool {
 }
 
 /// A ranked candidate: index into the input list, score, and matched char
-/// positions (for highlighting).
+/// positions (for highlighting; empty beyond the top `HIGHLIGHT_LIMIT`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ranked {
     pub index: usize,
@@ -269,18 +184,23 @@ pub struct Ranked {
 }
 
 /// Rank `items` against `query`: matches only, best score first; ties keep
-/// shorter strings first, then original order. Empty query keeps the original
-/// order. Pure.
+/// shorter strings first, then original order (like fzf's `--tiebreak`
+/// length,index). Empty query keeps the original order. Pure.
 pub fn rank(items: &[String], query: &str) -> Vec<Ranked> {
+    let pattern = parse_pattern(query);
+    let mut matcher = new_matcher();
+    let mut buf = Vec::new();
     let mut out: Vec<Ranked> = items
         .iter()
         .enumerate()
         .filter_map(|(index, s)| {
-            fuzzy_score(s, query).map(|(score, positions)| Ranked {
-                index,
-                score,
-                positions,
-            })
+            pattern
+                .score(nucleo_matcher::Utf32Str::new(s, &mut buf), &mut matcher)
+                .map(|score| Ranked {
+                    index,
+                    score: score as i64,
+                    positions: Vec::new(),
+                })
         })
         .collect();
     if !query.trim().is_empty() {
@@ -290,6 +210,18 @@ pub fn rank(items: &[String], query: &str) -> Vec<Ranked> {
                 .then(items[a.index].len().cmp(&items[b.index].len()))
                 .then(a.index.cmp(&b.index))
         });
+        let mut idx: Vec<u32> = Vec::new();
+        for r in out.iter_mut().take(HIGHLIGHT_LIMIT) {
+            idx.clear();
+            pattern.indices(
+                nucleo_matcher::Utf32Str::new(&items[r.index], &mut buf),
+                &mut matcher,
+                &mut idx,
+            );
+            idx.sort_unstable();
+            idx.dedup();
+            r.positions = idx.iter().map(|&i| i as usize).collect();
+        }
     }
     out
 }
@@ -305,52 +237,72 @@ pub fn filter_candidates(candidates: &[String], query: &str) -> Vec<String> {
 
 // --- filesystem collection --------------------------------------------------
 
-fn skip_dir(path: &Path) -> bool {
-    match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) => name.starts_with('.') || SKIP_NAMES.contains(&name),
-        None => true,
+/// Should the walker skip (not list, not descend into) this directory?
+/// `home` enables skipping macOS-style media/system folders directly under it.
+fn skip_dir(path: &Path, home: Option<&Path>) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return true;
+    };
+    if name.starts_with('.') || SKIP_NAMES.contains(&name) {
+        return true;
+    }
+    match (home, path.parent()) {
+        (Some(h), Some(parent)) => parent == h && SKIP_HOME_CHILDREN.contains(&name),
+        _ => false,
     }
 }
 
-/// Scan directories under `roots` up to `depth` levels (1 = direct children).
-/// Hidden and build/dependency dirs are skipped; descending stops at git
-/// repositories (a dir containing `.git` is listed but not descended into).
-/// Output order: per root, breadth-first, sorted within each level.
+/// Walk directories under `roots` up to `depth` levels (1 = direct children)
+/// with the `ignore` crate (ripgrep's parallel walker). Hidden dirs,
+/// `.gitignore`d dirs and build/dependency dirs are skipped. Output is sorted
+/// shallow-first, then by path, and capped at `MAX_SCANNED`.
 pub fn scan_roots(roots: &[String], depth: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    for root in roots {
-        let mut level: Vec<PathBuf> = vec![PathBuf::from(root)];
-        for _ in 0..depth {
-            let mut next = Vec::new();
-            for dir in &level {
-                let Ok(entries) = std::fs::read_dir(dir) else {
-                    continue;
-                };
-                let mut children: Vec<PathBuf> = entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir() && !skip_dir(p))
-                    .collect();
-                children.sort();
-                for child in children {
-                    if out.len() >= MAX_SCANNED {
-                        return out;
-                    }
-                    if let Some(s) = child.to_str() {
-                        out.push(s.to_string());
-                    }
-                    if !child.join(".git").exists() {
-                        next.push(child);
-                    }
-                }
-            }
-            level = next;
-            if level.is_empty() {
-                break;
-            }
-        }
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let roots: Vec<&String> = roots.iter().filter(|r| Path::new(r).is_dir()).collect();
+    let Some((first, rest)) = roots.split_first() else {
+        return Vec::new();
+    };
+    if depth == 0 {
+        return Vec::new();
     }
-    out
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut builder = ignore::WalkBuilder::new(first);
+    for r in rest {
+        builder.add(r);
+    }
+    builder
+        .max_depth(Some(depth))
+        .hidden(true)
+        .parents(false)
+        .follow_links(false)
+        .filter_entry(move |e| {
+            !(e.file_type().is_some_and(|t| t.is_dir()) && e.depth() > 0 && skip_dir(e.path(), home.as_deref()))
+        });
+
+    let found: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
+    let count = AtomicUsize::new(0);
+    builder.build_parallel().run(|| {
+        Box::new(|entry| {
+            let Ok(e) = entry else {
+                return ignore::WalkState::Continue;
+            };
+            if e.depth() == 0 || !e.file_type().is_some_and(|t| t.is_dir()) {
+                return ignore::WalkState::Continue;
+            }
+            if count.fetch_add(1, Ordering::Relaxed) >= MAX_SCANNED {
+                return ignore::WalkState::Quit;
+            }
+            if let Some(s) = e.path().to_str() {
+                found.lock().unwrap().push((e.depth(), s.to_string()));
+            }
+            ignore::WalkState::Continue
+        })
+    });
+    let mut found = found.into_inner().unwrap();
+    found.sort();
+    found.into_iter().map(|(_, p)| p).collect()
 }
 
 /// Parent directories of `cwds` that are worth scanning for siblings: skips
@@ -476,7 +428,9 @@ mod tests {
     fn fuzzy_subsequence_basics() {
         assert!(fuzzy_match("~/repos/sptv-video", "sptv"));
         assert!(fuzzy_match("~/repos/sptv-video", "svid"));
-        assert!(fuzzy_match("~/repos/sptv-video", "SPTV"));
+        // Smart case (like fzf): uppercase in the query makes it case-sensitive.
+        assert!(!fuzzy_match("~/repos/sptv-video", "SPTV"));
+        assert!(fuzzy_match("~/repos/nvim/LazyVim", "LazyV"));
         assert!(!fuzzy_match("~/repos/sptv-video", "xyz"));
         assert!(fuzzy_match("anything", ""));
     }
@@ -525,6 +479,18 @@ mod tests {
     }
 
     #[test]
+    fn fzf_query_syntax() {
+        let items = s(&["~/job/tmp1/sptv-video", "~/job/tmp1/sptv-video/cms", "~/repos/sptv"]);
+        // `$` anchors to the end, `^` to the start, `!` negates.
+        assert_eq!(filter_candidates(&items, "video$"), s(&["~/job/tmp1/sptv-video"]));
+        assert_eq!(filter_candidates(&items, "^~/repos"), s(&["~/repos/sptv"]));
+        assert_eq!(
+            filter_candidates(&items, "sptv !job"),
+            s(&["~/repos/sptv"])
+        );
+    }
+
+    #[test]
     fn empty_query_keeps_order() {
         let items = s(&["~/b", "~/a", "~/c"]);
         assert_eq!(filter_candidates(&items, ""), items);
@@ -548,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_respects_depth_hidden_and_git_repos() {
+    fn scan_respects_depth_and_skips_hidden_and_deps() {
         let base = std::env::temp_dir().join(format!("hnp-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         for d in [
@@ -567,9 +533,9 @@ mod tests {
             .iter()
             .map(|p| p.strip_prefix(&format!("{root}/")).unwrap().to_string())
             .collect();
-        // depth 1: group, proj-a; depth 2: group/proj-b (proj-a is a git repo,
-        // so not descended). Hidden/node_modules skipped; depth 3 not reached.
-        assert_eq!(rel, s(&["group", "proj-a", "group/proj-b"]));
+        // Shallow first, then by path. Hidden/node_modules skipped (also
+        // `.git`); depth 3 (`group/proj-b/deep`) not reached.
+        assert_eq!(rel, s(&["group", "proj-a", "group/proj-b", "proj-a/inner"]));
         let _ = std::fs::remove_dir_all(&base);
     }
 }
