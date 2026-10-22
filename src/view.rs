@@ -364,6 +364,24 @@ impl TreeView {
         self.selected
     }
 
+    /// Swap in a freshly polled tree, keeping the selection on the same node
+    /// (matched by its ids) even if rows above it appeared or disappeared.
+    /// Falls back to clamping when the node is gone. Returns whether anything
+    /// changed (so the caller can skip a redraw).
+    pub fn refresh_tree(&mut self, tree: Tree) -> bool {
+        if tree == self.tree {
+            return false;
+        }
+        let prev = self.selected_row().map(|r| r.kind);
+        self.tree = tree;
+        let rows = self.rows();
+        match prev.and_then(|k| rows.iter().position(|r| r.kind == k)) {
+            Some(i) => self.selected = i,
+            None => self.clamp_selection(),
+        }
+        true
+    }
+
     /// Replace the underlying tree (e.g. after a refresh), clamping selection.
     #[allow(dead_code)]
     pub fn set_tree(&mut self, tree: Tree) {
@@ -735,6 +753,41 @@ mod tests {
         assert_eq!(p.display_title(), "api › fix-login");
         p.label = Some("  ".into());
         assert_eq!(p.display_title(), "shell-a");
+    }
+
+    #[test]
+    fn refresh_tree_keeps_selection_on_same_node() {
+        let mut view = TreeView::new(sample_tree());
+        for _ in 0..4 {
+            view.move_down();
+        }
+        // rows: ws, t1, p1, t2, p2 -> p2 selected.
+        let before = view.selected_row().unwrap().kind;
+        assert!(matches!(&before, RowKind::Pane { pane_id, .. } if pane_id == "w1:p2"));
+        // Same tree: no change reported.
+        assert!(!view.refresh_tree(sample_tree()));
+        // Tab t1 (and p1) disappear: p2 moves from index 4 to 2 and stays
+        // selected; status changes are picked up.
+        let mut t = sample_tree();
+        t.workspaces[0].tabs.remove(0);
+        t.workspaces[0].tabs[0].panes[0].agent_status = Some("working".into());
+        assert!(view.refresh_tree(t));
+        assert_eq!(view.selected_index(), 2);
+        let row = view.selected_row().unwrap();
+        assert_eq!(row.kind, before);
+        assert_eq!(row.agent_status.as_deref(), Some("working"));
+    }
+
+    #[test]
+    fn refresh_tree_clamps_when_selected_node_is_gone() {
+        let mut view = TreeView::new(sample_tree());
+        for _ in 0..4 {
+            view.move_down();
+        }
+        let mut t = sample_tree();
+        t.workspaces[0].tabs.truncate(1); // drop t2 + p2 (selected)
+        assert!(view.refresh_tree(t));
+        assert_eq!(view.selected_index(), 2); // clamped to last row (p1)
     }
 
     #[test]
