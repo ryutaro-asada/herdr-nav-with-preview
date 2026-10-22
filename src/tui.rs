@@ -127,12 +127,17 @@ fn status_color(status: Option<&str>) -> Color {
     }
 }
 
-/// Status glyph, chosen to read like herdr's native agent indicators:
-/// working = half-filled (in progress), blocked = needs attention,
-/// done = finished check, idle = ready dot.
-fn status_glyph(status: Option<&str>) -> &'static str {
+/// Braille spinner frames for the `working` state.
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// How often the spinner advances (also the redraw tick while anything works).
+const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Status glyph: working = animated spinner (`tick` picks the frame),
+/// blocked = needs attention, done = finished check, idle = ready dot.
+fn status_glyph(status: Option<&str>, tick: usize) -> &'static str {
     match status {
-        Some("working") => "◐",
+        Some("working") => SPINNER[tick % SPINNER.len()],
         Some("blocked") => "▲",
         Some("done") => "✓",
         Some("idle") => "●",
@@ -142,6 +147,38 @@ fn status_glyph(status: Option<&str>) -> &'static str {
 
 /// Per-kind color: workspace blue, tab purple, pane peach. Chosen to stay
 /// distinct from the agent-status dot colors (yellow/red/green/cyan).
+/// Is this an "active" status worth flagging loudly (working/blocked/done)?
+fn is_notable_status(status: Option<&str>) -> bool {
+    matches!(status, Some("working" | "blocked" | "done"))
+}
+
+/// Filled status chip for pane rows: ` working ` on yellow, ` blocked ` on
+/// red, ` done ` on cyan. `None` for idle/unknown (kept quiet).
+fn status_chip(status: Option<&str>) -> Option<(&'static str, Style)> {
+    let (text, fg, bg) = match status {
+        Some("working") => (" working ", Color::Black, Color::Yellow),
+        Some("blocked") => (" blocked ", Color::White, Color::Red),
+        Some("done") => (" done ", Color::Black, Color::Cyan),
+        _ => return None,
+    };
+    Some((text, Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)))
+}
+
+/// Counts of panes per notable status, for the tree title summary:
+/// `(working, blocked, done)`.
+fn status_counts(tree: &Tree) -> (usize, usize, usize) {
+    let mut c = (0, 0, 0);
+    for p in tree.workspaces.iter().flat_map(|w| &w.tabs).flat_map(|t| &t.panes) {
+        match p.agent_status.as_deref() {
+            Some("working") => c.0 += 1,
+            Some("blocked") => c.1 += 1,
+            Some("done") => c.2 += 1,
+            _ => {}
+        }
+    }
+    c
+}
+
 fn kind_color(kind: &RowKind) -> Color {
     match kind {
         RowKind::Workspace { .. } => Color::Rgb(130, 170, 255),
@@ -153,7 +190,7 @@ fn kind_color(kind: &RowKind) -> Color {
 /// Build a styled line for one tree row, herdr-navigator style:
 /// `▎ <tree-glyph> <status-dot> <name> [agent]`. When selected, the whole row
 /// is filled with a solid highlight background across the full width.
-fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'static> {
+fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -> Line<'static> {
     use crate::view::RowKind;
 
     // Solid fill behind the selected row, like herdr's native cursor.
@@ -209,14 +246,17 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
     };
     spans.push(Span::styled(kind_icon, base(Style::default().fg(kind_color))));
 
-    // Agent status dot: only on pane rows, so the session/tab rows stay clean
-    // and the running state reads at the pane level.
-    if matches!(row.kind, RowKind::Pane { .. }) {
-        let status = row.agent_status.as_deref();
-        spans.push(Span::styled(
-            format!("{} ", status_glyph(status)),
-            base(Style::default().fg(status_color(status))),
-        ));
+    // Agent status glyph. Pane rows always show it; workspace/tab rows show
+    // herdr's aggregated status only when notable (working/blocked/done), so
+    // activity is visible even when the node is collapsed.
+    let status = row.agent_status.as_deref();
+    let is_pane = matches!(row.kind, RowKind::Pane { .. });
+    if is_pane || is_notable_status(status) {
+        let mut st = Style::default().fg(status_color(status));
+        if is_notable_status(status) {
+            st = st.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(format!("{} ", status_glyph(status, tick)), base(st)));
     }
 
     // The name, in the kind's color. Workspaces bold; the focused workspace is
@@ -242,8 +282,16 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         .as_deref()
         .map(unicode_width::UnicodeWidthStr::width)
         .unwrap_or(0);
+    // Right-aligned status chip on pane rows (working/blocked/done).
+    let chip = if is_pane { status_chip(status) } else { None };
+    let chip_w = chip
+        .map(|(t, _)| unicode_width::UnicodeWidthStr::width(t) + 1)
+        .unwrap_or(0);
     let avail = width.saturating_sub(used);
-    let name = truncate_display(&row.name, avail.saturating_sub(badge_w).max(1));
+    let name = truncate_display(
+        &row.name,
+        avail.saturating_sub(badge_w + chip_w).max(1),
+    );
     let name_w = unicode_width::UnicodeWidthStr::width(name.as_str());
     spans.push(Span::styled(name, base(name_style)));
     if let Some(badge) = agent_badge {
@@ -251,13 +299,16 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
         spans.push(Span::styled(badge, badge_style));
     }
 
-    // Pad to full width so the highlight fill spans the whole row.
-    if selected {
-        let drawn = used + name_w + badge_w;
-        let pad = width.saturating_sub(drawn);
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(sel_bg)));
-        }
+    // Pad so the chip sits at the right edge and (when selected) the highlight
+    // fill spans the whole row.
+    let drawn = used + name_w + badge_w;
+    let pad = width.saturating_sub(drawn + chip_w);
+    if pad > 0 && (selected || chip.is_some()) {
+        spans.push(Span::styled(" ".repeat(pad), base(Style::default())));
+    }
+    if let Some((text, style)) = chip {
+        spans.push(Span::styled(text, style));
+        spans.push(Span::styled(" ", base(Style::default())));
     }
 
     Line::from(spans)
@@ -588,8 +639,20 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     let mut dirty = true;
     // Persisted vertical scroll offset for the tree (sticky scrolling).
     let mut scroll: usize = 0;
+    // Spinner animation: the frame index derives from elapsed time, and we
+    // redraw on each new frame only while some agent is working.
+    let started = std::time::Instant::now();
+    let mut tick: usize = 0;
 
     loop {
+        let counts = status_counts(view.tree());
+        let now_tick = (started.elapsed().as_millis() / SPINNER_INTERVAL.as_millis()) as usize;
+        if now_tick != tick {
+            tick = now_tick;
+            if counts.0 > 0 {
+                dirty = true;
+            }
+        }
         if dirty {
             let rows = view.rows();
             let selected = view.selected_index();
@@ -618,6 +681,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                     &title,
                     bar,
                     &mut scroll_ref,
+                    tick,
+                    counts,
                 )
             })?;
             scroll = scroll_ref;
@@ -966,6 +1031,31 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     }
 }
 
+/// Tree block title: ` spaces ` plus a summary of agent activity across all
+/// panes, e.g. ` ⠋ 2 working  ▲ 1 blocked  ✓ 1 done `. Zero counts are hidden.
+fn tree_title(counts: (usize, usize, usize), tick: usize) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        " spaces ",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )];
+    let (working, blocked, done) = counts;
+    for (n, status, word) in [
+        (working, "working", "working"),
+        (blocked, "blocked", "blocked"),
+        (done, "done", "done"),
+    ] {
+        if n > 0 {
+            spans.push(Span::styled(
+                format!(" {} {n} {word} ", status_glyph(Some(status), tick)),
+                Style::default()
+                    .fg(status_color(Some(status)))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
 /// Title for the preview block based on the selected row.
 fn preview_title(rows: &[crate::view::Row], selected: usize) -> String {
     match rows.get(selected).map(|r| &r.kind) {
@@ -988,6 +1078,8 @@ pub fn draw(
     preview_title: &str,
     status: Option<&str>,
     prev_offset: &mut usize,
+    tick: usize,
+    counts: (usize, usize, usize),
 ) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -1015,7 +1107,7 @@ pub fn draw(
         .skip(offset)
         .take(tree_inner_height.max(1))
     {
-        lines.push(row_line(row, i == selected, tree_inner_width));
+        lines.push(row_line(row, i == selected, tree_inner_width, tick));
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -1028,12 +1120,7 @@ pub fn draw(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(
-                " spaces ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            .title(tree_title(counts, tick)),
     );
     frame.render_widget(tree_widget, chunks[0]);
 
