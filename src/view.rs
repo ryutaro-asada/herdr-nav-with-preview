@@ -396,8 +396,12 @@ impl TreeView {
             } else {
                 w.label.clone()
             };
+            // Skip the suffix when the label already ends with it (workspaces
+            // created via `N` default to "name (branch)").
             let label = match &w.branch {
-                Some(b) if !b.is_empty() => format!("{label} ({b})"),
+                Some(b) if !b.is_empty() && !label.ends_with(&format!("({b})")) => {
+                    format!("{label} ({b})")
+                }
                 _ => label,
             };
             let name = if w.number > 0 {
@@ -954,5 +958,16 @@ mod tests {
         let rows = view.rows();
         assert!(rows[0].name.contains("proj"));
         assert!(!rows[0].name.contains('('), "got {:?}", rows[0].name);
+    }
+
+    #[test]
+    fn workspace_name_does_not_repeat_branch_already_in_label() {
+        let mut tree = sample_tree();
+        tree.workspaces[0].label = "proj (main)".to_string();
+        tree.workspaces[0].branch = Some("main".to_string());
+        let view = TreeView::new(tree);
+        let rows = view.rows();
+        assert!(rows[0].name.ends_with("proj (main)"), "got {:?}", rows[0].name);
+        assert!(!rows[0].name.contains("(main) (main)"), "got {:?}", rows[0].name);
     }
 }
