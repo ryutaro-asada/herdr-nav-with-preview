@@ -164,6 +164,10 @@ pub struct Pane {
     pub pane_id: String,
     pub tab_id: String,
     pub workspace_id: String,
+    /// Pane label (herdr >= 0.8; set by `herdr pane rename` or naming
+    /// plugins such as herdr-auto-title).
+    #[serde(default)]
+    pub label: Option<String>,
     #[serde(default)]
     pub terminal_title_stripped: Option<String>,
     #[serde(default)]
@@ -179,12 +183,15 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// Human-friendly one-line label for the pane, preferring a stripped
-    /// terminal title, then the raw title, then the agent name, then a generic
-    /// "shell". Never falls back to the raw pane id, which looks like noise.
+    /// Human-friendly one-line label for the pane, preferring its label, then
+    /// a stripped terminal title, then the raw title, then the agent name,
+    /// then a generic "shell". Never falls back to the raw pane id, which
+    /// looks like noise.
     pub fn display_title(&self) -> String {
-        self.terminal_title_stripped
+        self.label
             .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(self.terminal_title_stripped.as_deref())
             .filter(|s| !s.trim().is_empty())
             .or(self.terminal_title.as_deref())
             .filter(|s| !s.trim().is_empty())

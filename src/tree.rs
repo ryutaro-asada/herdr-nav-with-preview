@@ -151,22 +151,6 @@ impl Tree {
         max.max(self.workspaces.len() as u32) + 1
     }
 
-    /// The default label for a new tab in `workspace_id`: one past the highest
-    /// existing tab number in that workspace (falling back to count + 1).
-    pub fn next_tab_number(&self, workspace_id: &str) -> u32 {
-        let ws = self
-            .workspaces
-            .iter()
-            .find(|w| w.workspace_id == workspace_id);
-        match ws {
-            Some(w) => {
-                let max = w.tabs.iter().map(|t| t.number).max().unwrap_or(0);
-                max.max(w.tabs.len() as u32) + 1
-            }
-            None => 1,
-        }
-    }
-
     /// Render the tree as indented text. Used by the `--dump-tree` debug command
     /// and handy for assertions.
     pub fn to_indented_text(&self) -> String {
@@ -233,6 +217,7 @@ mod tests {
             pane_id: id.into(),
             tab_id: tab.into(),
             workspace_id: ws.into(),
+            label: None,
             terminal_title_stripped: Some(title.into()),
             terminal_title: None,
             agent: None,
@@ -327,18 +312,6 @@ mod tests {
         w2.number = 7;
         let tree = Tree::build(vec![w1, w2], vec![], vec![], None);
         assert_eq!(tree.next_workspace_number(), 8);
-    }
-
-    #[test]
-    fn next_tab_number_is_one_past_max_in_workspace() {
-        let mut t1 = tab("w1:t1", "w1", "a");
-        t1.number = 1;
-        let mut t3 = tab("w1:t3", "w1", "c");
-        t3.number = 3;
-        let tree = Tree::build(vec![ws("w1", "x", false)], vec![t1, t3], vec![], None);
-        assert_eq!(tree.next_tab_number("w1"), 4);
-        // Unknown workspace -> 1.
-        assert_eq!(tree.next_tab_number("zzz"), 1);
     }
 
     #[test]

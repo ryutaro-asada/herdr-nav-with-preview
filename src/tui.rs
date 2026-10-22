@@ -705,7 +705,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             } else {
                 input_buf.as_ref().map(|b| {
                     let what = match input_target {
-                        Some(InputTarget::Tab { .. }) => "new tab name",
+                        Some(InputTarget::Tab { .. }) => "new tab name (empty = auto)",
                         _ => "new workspace name",
                     };
                     format!("{what}: {b}\u{2588}")
@@ -927,7 +927,9 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                             }
                             KeyCode::Char('n') => {
                                 // Open a prompt to add a tab to the selected
-                                // workspace. Default name is the next tab number.
+                                // workspace. Starts empty: Enter on an empty name
+                                // leaves the tab unnamed, so herdr (or a naming
+                                // plugin such as herdr-auto-title) names it.
                                 let ws = view.selected_row().map(|r| match r.kind {
                                     RowKind::Workspace { workspace_id } => workspace_id,
                                     RowKind::Tab { workspace_id, .. } => workspace_id,
@@ -935,12 +937,10 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 });
                                 match ws {
                                     Some(wid) => {
-                                        let default =
-                                            view.tree().next_tab_number(&wid).to_string();
                                         status = None;
                                         input_target =
                                             Some(InputTarget::Tab { workspace_id: wid });
-                                        input_buf = Some(default);
+                                        input_buf = Some(String::new());
                                     }
                                     None => {
                                         status =

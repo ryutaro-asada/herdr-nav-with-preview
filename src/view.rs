@@ -233,6 +233,15 @@ pub fn filter_rows(all: &[Row], query: &str) -> Vec<Row> {
         .collect()
 }
 
+/// Does `label` already lead with a number plus a separator (e.g.
+/// herdr-auto-title's `2 · api`, or `2. api`)? Then we don't prefix the tab
+/// number: such labels carry their own (position) number, which can differ
+/// from herdr's internal tab number. Pure.
+fn has_number_prefix(label: &str) -> bool {
+    let rest = label.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.len() < label.len() && (rest.starts_with(" ·") || rest.starts_with(". "))
+}
+
 pub struct TreeView {    tree: Tree,
     /// Keys of nodes that are collapsed. Default (absent) == expanded.
     collapsed: HashSet<String>,
@@ -459,7 +468,7 @@ impl TreeView {
                     } else {
                         t.tab_id.clone()
                     }
-                } else if t.number > 0 {
+                } else if t.number > 0 && !has_number_prefix(tlabel) {
                     format!("{}  {}", t.number, tlabel)
                 } else {
                     tlabel.to_string()
@@ -566,6 +575,21 @@ mod tests {
     use super::*;
     use crate::herdr_client::{Pane, Tab, Workspace};
 
+    fn sample_tree_panes() -> Vec<Pane> {
+        vec![Pane {
+            pane_id: "w1:p1".into(),
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            label: None,
+            terminal_title_stripped: Some("shell-a".into()),
+            terminal_title: None,
+            agent: None,
+            agent_status: None,
+            focused: false,
+            cwd: None,
+        }]
+    }
+
     fn sample_tree() -> Tree {
         let ws = vec![Workspace {
             workspace_id: "w1".into(),
@@ -602,6 +626,7 @@ mod tests {
                 pane_id: "w1:p1".into(),
                 tab_id: "w1:t1".into(),
                 workspace_id: "w1".into(),
+                label: None,
                 terminal_title_stripped: Some("shell-a".into()),
                 terminal_title: None,
                 agent: None,
@@ -613,6 +638,7 @@ mod tests {
                 pane_id: "w1:p2".into(),
                 tab_id: "w1:t2".into(),
                 workspace_id: "w1".into(),
+                label: None,
                 terminal_title_stripped: Some("shell-b".into()),
                 terminal_title: None,
                 agent: Some("claude".into()),
@@ -706,6 +732,30 @@ mod tests {
     }
 
     #[test]
+    fn tab_label_with_leading_number_is_not_prefixed_again() {
+        assert!(has_number_prefix("1 · api"));
+        assert!(has_number_prefix("12. api"));
+        assert!(!has_number_prefix("2024 plan"));
+        assert!(!has_number_prefix("api"));
+        let mut t = sample_tree();
+        t.workspaces[0].tabs[0].label = "1 · proj › nvim".into();
+        let view = TreeView::new(t);
+        let rows = view.rows();
+        assert_eq!(rows[1].name, "1 · proj › nvim");
+        // Plain labels still get the number.
+        assert_eq!(rows[3].name, "2  b");
+    }
+
+    #[test]
+    fn pane_label_wins_over_terminal_title() {
+        let mut p = sample_tree_panes().remove(0);
+        p.label = Some("api › fix-login".into());
+        assert_eq!(p.display_title(), "api › fix-login");
+        p.label = Some("  ".into());
+        assert_eq!(p.display_title(), "shell-a");
+    }
+
+    #[test]
     fn refresh_tree_keeps_selection_on_same_node() {
         let mut view = TreeView::new(sample_tree());
         for _ in 0..4 {
@@ -796,6 +846,7 @@ mod tests {
             pane_id: "w1:p1".into(),
             tab_id: "w1:t1".into(),
             workspace_id: "w1".into(),
+            label: None,
             terminal_title_stripped: Some("only".into()),
             terminal_title: None,
             agent: None,
