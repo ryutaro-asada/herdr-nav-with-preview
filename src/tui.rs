@@ -263,6 +263,18 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize) -> Line<'stati
     Line::from(spans)
 }
 
+/// `base` if no existing label equals it, otherwise `base-2`, `base-3`, ...
+/// (the first free number). Pure.
+fn unique_label(base: &str, existing: &[&str]) -> String {
+    if !existing.contains(&base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|c| !existing.contains(&c.as_str()))
+        .expect("unbounded range always yields a free label")
+}
+
 /// The project name for a cwd: its last path component (basename), matching
 /// herdr's native workspace auto-naming. Empty if the path has no component.
 fn project_name(cwd: &str) -> String {
@@ -864,14 +876,21 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 // tree regardless of the outcome.
                                 guard.terminal().clear().ok();
                                 if let Some(dir) = chosen {
-                                    // Default name = project dir name (+ branch).
+                                    // Default name = project dir name, made unique
+                                    // among existing workspace labels (`name-2`, ...).
+                                    // No branch: it would go stale on checkout (the
+                                    // tree shows the live branch anyway).
                                     let name = project_name(&dir);
-                                    let default = match crate::herdr_client::git_branch(&dir) {
-                                        Some(b) if !name.is_empty() => format!("{name} ({b})"),
-                                        _ if name.is_empty() => {
-                                            view.tree().next_workspace_number().to_string()
-                                        }
-                                        _ => name,
+                                    let default = if name.is_empty() {
+                                        view.tree().next_workspace_number().to_string()
+                                    } else {
+                                        let labels: Vec<&str> = view
+                                            .tree()
+                                            .workspaces
+                                            .iter()
+                                            .map(|w| w.label.as_str())
+                                            .collect();
+                                        unique_label(&name, &labels)
                                     };
                                     status = None;
                                     input_target = Some(InputTarget::Workspace {
