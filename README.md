@@ -39,7 +39,7 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 | `←` / `→` (or `h` / `l`) | Collapse / expand |
 | `/` | Incremental search: filter the tree by name, agent, or id |
 | `n` | Add a tab to the selected workspace (name prompt) |
-| `N` | Add a workspace: pick its directory with a fuzzy finder, then name it (defaults to the project directory name) |
+| `N` | Add a workspace: pick its directory with a fuzzy finder, then name it (defaults to the directory name; `name-2`, `name-3`, … if taken) |
 | `x` | Close the selected pane (`Enter` to confirm, `Esc` to cancel) |
 | `Enter` | Focus the selected pane and close the navigator |
 | `q` / `Esc` | Quit without jumping |
