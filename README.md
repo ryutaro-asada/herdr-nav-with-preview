@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 
 ## Features
 
-- Collapsible `workspace > tab > pane` tree with per-kind icons and agent status:
+- Collapsible `workspace > tab > pane` tree. Workspaces with similar names (`api`, `api-2`, `api (main)`) are grouped together, groups sorted by name. Per-kind icons and agent status:
   working agents get an animated spinner (also on their tab and workspace, so it
   shows when collapsed), and the tree title sums up activity across all panes.
 - Agent pane rows get a status chip: `working` (yellow), `waiting` (red — the
