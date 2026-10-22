@@ -43,6 +43,23 @@ pub fn git_branch(cwd: &str) -> Option<String> {
     }
 }
 
+/// Directories known to `zoxide`, most-frecent first, or an empty list when
+/// zoxide is not installed/usable. Shells out to `zoxide query -l`.
+pub fn zoxide_dirs() -> Vec<String> {
+    let output = match std::process::Command::new("zoxide")
+        .args(["query", "-l"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 /// The navigator's own overlay pane id, if launched as a plugin pane. herdr
 /// sets `HERDR_PANE_ID` to the running pane; we exclude it from the tree so the
 /// navigator doesn't list itself. Popups are not panes and have no

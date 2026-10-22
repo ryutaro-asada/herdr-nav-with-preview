@@ -274,6 +274,251 @@ fn project_name(cwd: &str) -> String {
         .to_string()
 }
 
+/// Selection/filter state for the directory picker. Keeps absolute paths (used
+/// to create the workspace) and their `~`-abbreviated display form (used for
+/// matching and drawing), the fuzzy query, the ranked matches for the current
+/// query, and the selected index into those matches. Unit-tested.
+struct DirPicker {
+    paths: Vec<String>,
+    displays: Vec<String>,
+    query: String,
+    ranked: Vec<crate::dirs::Ranked>,
+    selected: usize,
+}
+
+impl DirPicker {
+    fn new(paths: Vec<String>, home: Option<&str>) -> Self {
+        let displays = paths
+            .iter()
+            .map(|p| crate::dirs::abbreviate_home(p, home))
+            .collect();
+        let mut picker = Self {
+            paths,
+            displays,
+            query: String::new(),
+            ranked: Vec::new(),
+            selected: 0,
+        };
+        picker.refilter();
+        picker
+    }
+
+    fn refilter(&mut self) {
+        self.ranked = crate::dirs::rank(&self.displays, &self.query);
+        self.selected = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.ranked.len()
+    }
+
+    fn move_down(&mut self) {
+        if self.selected + 1 < self.len() {
+            self.selected += 1;
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    fn push(&mut self, c: char) {
+        self.query.push(c);
+        self.refilter();
+    }
+
+    fn pop(&mut self) {
+        self.query.pop();
+        self.refilter();
+    }
+
+    fn clear(&mut self) {
+        self.query.clear();
+        self.refilter();
+    }
+
+    /// The absolute path of the currently selected match, if any.
+    fn selection(&self) -> Option<String> {
+        self.ranked
+            .get(self.selected)
+            .map(|r| self.paths[r.index].clone())
+    }
+
+    /// Display rows for drawing: (display string, matched char positions).
+    fn rows(&self) -> Vec<(&str, &[usize])> {
+        self.ranked
+            .iter()
+            .map(|r| (self.displays[r.index].as_str(), r.positions.as_slice()))
+            .collect()
+    }
+}
+
+/// Interactive directory picker: a fuzzy list over `candidates` (absolute
+/// paths). Type to filter (fzf-style, ranked), Up/Down or Ctrl+n/Ctrl+p to
+/// move, Ctrl+u to clear, Enter to choose, Esc to cancel. Reuses the active
+/// `TerminalGuard`. Returns the chosen absolute path, or `None` if cancelled.
+fn pick_directory(guard: &mut TerminalGuard, candidates: Vec<String>) -> Result<Option<String>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let home = std::env::var("HOME").ok();
+    let mut picker = DirPicker::new(candidates, home.as_deref());
+    let mut scroll: usize = 0;
+    let mut dirty = true;
+    loop {
+        if dirty {
+            let rows = picker.rows();
+            let selected = picker.selected;
+            let query = picker.query.clone();
+            let total = picker.paths.len();
+            guard.terminal().draw(|frame| {
+                draw_dir_picker(frame, &rows, selected, &query, total, &mut scroll)
+            })?;
+            dirty = false;
+        }
+        if event::poll(EVENT_POLL)? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                dirty = true;
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Enter => return Ok(picker.selection()),
+                    KeyCode::Down => picker.move_down(),
+                    KeyCode::Up => picker.move_up(),
+                    KeyCode::Char('n') | KeyCode::Char('j') if ctrl => picker.move_down(),
+                    KeyCode::Char('p') | KeyCode::Char('k') if ctrl => picker.move_up(),
+                    KeyCode::Char('u') if ctrl => picker.clear(),
+                    KeyCode::Char('c') if ctrl => return Ok(None),
+                    KeyCode::Backspace => picker.pop(),
+                    // Ignore other control chords instead of typing them.
+                    KeyCode::Char(_) if ctrl => {}
+                    KeyCode::Char(c) => picker.push(c),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Fit `s` into `width` columns, keeping the end (the project name) and
+/// replacing a dropped prefix with `…`. Returns the visible chars as
+/// (char, original index) pairs so match highlights stay aligned. Pure.
+fn fit_tail(s: &str, width: usize) -> (bool, Vec<(char, usize)>) {
+    use unicode_width::UnicodeWidthChar;
+    let chars: Vec<char> = s.chars().collect();
+    let total: usize = chars.iter().map(|c| c.width().unwrap_or(0)).sum();
+    if total <= width {
+        return (false, chars.into_iter().enumerate().map(|(i, c)| (c, i)).collect());
+    }
+    let budget = width.saturating_sub(1);
+    let mut used = 0;
+    let mut start = chars.len();
+    while start > 0 {
+        let w = chars[start - 1].width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        start -= 1;
+    }
+    (
+        true,
+        chars[start..]
+            .iter()
+            .enumerate()
+            .map(|(k, &c)| (c, start + k))
+            .collect(),
+    )
+}
+
+/// Render the directory picker: the ranked matching directories (matched
+/// characters highlighted, selected row filled) and a filter prompt below.
+fn draw_dir_picker(
+    frame: &mut ratatui::Frame,
+    rows: &[(&str, &[usize])],
+    selected: usize,
+    query: &str,
+    total: usize,
+    scroll: &mut usize,
+) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(frame.area());
+
+    let inner_w = outer[0].width.saturating_sub(2) as usize;
+    let inner_h = outer[0].height.saturating_sub(2) as usize;
+    let offset = crate::view::scroll_offset(selected, rows.len(), inner_h, *scroll);
+    *scroll = offset;
+
+    let sel_bg = Color::Rgb(68, 80, 120);
+    let mut lines: Vec<Line> = Vec::new();
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " (no matching directories)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, (display, positions)) in rows.iter().enumerate().skip(offset).take(inner_h.max(1)) {
+        let is_sel = i == selected;
+        let base = if is_sel {
+            Style::default().bg(sel_bg).fg(Color::White)
+        } else {
+            Style::default()
+        };
+        let hl = base.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push(Span::styled(
+            if is_sel { "▏ " } else { "  " },
+            if is_sel { Style::default().fg(Color::Cyan).bg(sel_bg) } else { base },
+        ));
+        let (cut, visible) = fit_tail(display, inner_w.saturating_sub(2).max(1));
+        if cut {
+            spans.push(Span::styled("…", base.fg(Color::DarkGray)));
+        }
+        let mut used = 2 + usize::from(cut);
+        for (c, idx) in visible {
+            let style = if positions.binary_search(&idx).is_ok() { hl } else { base };
+            spans.push(Span::styled(c.to_string(), style));
+            used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        }
+        if is_sel && used < inner_w {
+            spans.push(Span::styled(" ".repeat(inner_w - used), base));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let list = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                " new workspace — pick a directory ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+    );
+    frame.render_widget(list, outer[0]);
+
+    let bar = Line::from(vec![
+        Span::styled(" > ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{query}\u{2588}"), Style::default().fg(Color::White)),
+        Span::styled(
+            format!(
+                "   {}/{}   ↑↓/^n^p move  ^u clear  ⏎ choose  Esc cancel",
+                rows.len(),
+                total
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(bar), outer[1]);
+}
+
 /// Truncate `s` so its display width fits in `max_width` columns, appending an
 /// ellipsis when truncated. Honors wide (CJK) characters so Japanese titles
 /// don't overrun the pane. Pure and unit-tested.
@@ -595,31 +840,47 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 }
                             }
                             KeyCode::Char('N') => {
-                                // Open a prompt to add a workspace. Default name is
-                                // the selected project's directory name (like
-                                // herdr's native auto-naming); remember its cwd.
-                                let cwd = view.selected_row().and_then(|r| {
+                                // Add a workspace: first pick the directory via a
+                                // fuzzy picker (current cwd, zoxide, and scanned
+                                // roots), then open the name prompt for it.
+                                let current_cwd = view.selected_row().and_then(|r| {
                                     r.representative_pane(view.tree())
                                         .and_then(|p| p.cwd.clone())
                                 });
-                                let default = cwd
-                                    .as_deref()
-                                    .map(|c| {
-                                        let name = project_name(c);
-                                        // Include the git branch when `c` is a
-                                        // repo: "name (branch)".
-                                        match crate::herdr_client::git_branch(c) {
-                                            Some(b) if !name.is_empty() => format!("{name} ({b})"),
-                                            _ => name,
+                                let open_cwds: Vec<String> = view
+                                    .tree()
+                                    .workspaces
+                                    .iter()
+                                    .flat_map(|w| w.tabs.iter())
+                                    .flat_map(|t| t.panes.iter())
+                                    .filter_map(|p| p.cwd.clone())
+                                    .collect();
+                                let candidates = crate::dirs::collect_candidates(
+                                    current_cwd.as_deref(),
+                                    &open_cwds,
+                                );
+                                let chosen = pick_directory(&mut guard, candidates)?;
+                                // The picker painted its own screen; repaint the
+                                // tree regardless of the outcome.
+                                guard.terminal().clear().ok();
+                                if let Some(dir) = chosen {
+                                    // Default name = project dir name (+ branch).
+                                    let name = project_name(&dir);
+                                    let default = match crate::herdr_client::git_branch(&dir) {
+                                        Some(b) if !name.is_empty() => format!("{name} ({b})"),
+                                        _ if name.is_empty() => {
+                                            view.tree().next_workspace_number().to_string()
                                         }
-                                    })
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or_else(|| {
-                                        view.tree().next_workspace_number().to_string()
+                                        _ => name,
+                                    };
+                                    status = None;
+                                    input_target = Some(InputTarget::Workspace {
+                                        cwd: Some(dir),
                                     });
-                                status = None;
-                                input_target = Some(InputTarget::Workspace { cwd });
-                                input_buf = Some(default);
+                                    input_buf = Some(default);
+                                } else {
+                                    status = None; // cancelled
+                                }
                             }
                             KeyCode::Enter => {
                                 if let Some(row) = view.selected_row() {

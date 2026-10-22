@@ -33,10 +33,31 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 | `←` / `→` (or `h` / `l`) | Collapse / expand |
 | `/` | Incremental search: filter the tree by name, agent, or id |
 | `n` | Add a tab to the selected workspace (name prompt) |
-| `N` | Add a workspace (name prompt; defaults to the project directory name) |
+| `N` | Add a workspace: pick its directory with a fuzzy finder, then name it (defaults to the project directory name) |
 | `x` | Close the selected pane (`Enter` to confirm, `Esc` to cancel) |
 | `Enter` | Focus the selected pane and close the navigator |
 | `q` / `Esc` | Quit without jumping |
+
+## New-workspace directory picker
+
+`N` opens an fzf-style picker. Type to fuzzy-filter; results are ranked
+(contiguous matches, word boundaries and the directory basename score higher)
+and matched characters are highlighted. Space-separated terms must all match
+(`tmp1 sptv`). Keys: `↑`/`↓` or `Ctrl+n`/`Ctrl+p` (`Ctrl+j`/`Ctrl+k`) move,
+`Ctrl+u` clears, `Enter` chooses, `Esc`/`Ctrl+c` cancels.
+
+Candidates, in order: the selected pane's cwd, cwds of all open panes,
+[zoxide](https://github.com/ajeetdsouza/zoxide) history (if installed),
+siblings of open cwds, and directories found under the scan roots (default
+`~/repos ~/src ~/work ~/dev ~/projects ~/code ~/go/src ~/ghq`, depth 2; hidden
+dirs and `node_modules`/`target`/etc. are skipped, git repos are not descended
+into). Override the roots in `config.toml` in the plugin config directory
+(`$HERDR_PLUGIN_CONFIG_DIR`):
+
+```toml
+roots = ["~/repos", "~/job"]
+depth = 3
+```
 
 ## Requirements
 
