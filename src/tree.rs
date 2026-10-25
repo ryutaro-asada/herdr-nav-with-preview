@@ -1,6 +1,7 @@
 //! Builds a `workspace > tab > pane` tree from the flat lists returned by the
 //! herdr CLI, grouping tabs under workspaces and panes under tabs by their id
-//! fields. Ordering is stabilized by id so the UI is deterministic.
+//! fields. Tabs and panes are ordered by id and workspaces by name group (see
+//! `workspace_group_key`), so the UI is deterministic.
 
 use anyhow::Result;
 
@@ -140,7 +141,6 @@ impl Tree {
                         }
                     })
                     .collect::<Vec<TabNode>>();
-                // Representative cwd: the first pane of the first tab.
                 let cwd = tab_nodes
                     .first()
                     .and_then(|t| t.panes.first())
@@ -299,7 +299,7 @@ mod tests {
             None,
         );
 
-        // Sorted by workspace_id: w1 then w2.
+        // Grouped by label: "first" (w1) before "second" (w2).
         assert_eq!(tree.workspaces.len(), 2);
         assert_eq!(tree.workspaces[0].workspace_id, "w1");
         assert!(tree.workspaces[0].focused);

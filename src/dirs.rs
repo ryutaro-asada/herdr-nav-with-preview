@@ -144,8 +144,6 @@ pub fn order_candidates(current: Option<&str>, others: &[String]) -> Vec<String>
     out
 }
 
-// --- fuzzy ranking (nucleo-matcher) ----------------------------------------
-
 /// Highlight positions are computed only for this many top results (the
 /// visible list is never taller), keeping each keystroke cheap on large lists.
 const HIGHLIGHT_LIMIT: usize = 500;
@@ -246,8 +244,6 @@ pub fn filter_candidates(candidates: &[String], query: &str) -> Vec<String> {
         .map(|r| candidates[r.index].clone())
         .collect()
 }
-
-// --- filesystem collection --------------------------------------------------
 
 /// Should the walker skip (not list, not descend into) this directory?
 /// `home` enables skipping macOS-style media/system folders directly under it.
@@ -469,8 +465,8 @@ mod tests {
 
     #[test]
     fn ranks_basename_contiguous_match_first() {
-        // The bug: "sptv" used to match these junk entries via the home
-        // prefix and alphabetical order put them first.
+        // Entries that only match "sptv" through scattered characters must
+        // not outrank the real project.
         let items = s(&[
             "~/repos/jumpstart-vite",
             "~/repos/tview",

@@ -273,8 +273,6 @@ pub fn parse_created_tab_id(json: &str) -> Result<String> {
     parse_result::<CreateTabResult>(json, "tab create").map(|r| r.tab.tab_id)
 }
 
-// --- CLI invocation ---
-
 /// A plan describing how to jump focus to a target, as an ordered list of
 /// herdr focus steps. On herdr 0.7.x there is no "focus pane by id", so we
 /// focus the workspace, then the tab (which brings its pane forward), and

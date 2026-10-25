@@ -108,7 +108,8 @@ impl Poller {
             let (lock, cvar) = &*thread_shared;
 
             loop {
-                // Snapshot the current request under the lock.
+                // Clone the request so the lock isn't held during the slow
+                // herdr call.
                 let req = {
                     let guard = lock.lock().unwrap();
                     if guard.stop {

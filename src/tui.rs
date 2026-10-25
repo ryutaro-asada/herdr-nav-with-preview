@@ -231,8 +231,6 @@ fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'stati
     // (ancestor was the last child), then the node's own branch "├─"/"└─".
     if row.depth > 0 {
         let mut tree_prefix = String::new();
-        // Skip the workspace-level ancestor (index 0); start the vertical lines
-        // from the tab level downward.
         for &anc_last in row.ancestors_last.iter().skip(1) {
             tree_prefix.push_str(if anc_last { "  " } else { "│ " });
         }
@@ -244,7 +242,6 @@ fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'stati
         ));
     }
 
-    // Expand/collapse caret for expandable nodes.
     if row.expandable {
         let caret = if row.expanded { "▾ " } else { "▸ " };
         spans.push(Span::styled(
@@ -295,7 +292,6 @@ fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'stati
         name_style = name_style.fg(Color::White).add_modifier(Modifier::BOLD);
     }
 
-    // Width already consumed by the prefix spans.
     let used: usize = spans
         .iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
@@ -357,7 +353,7 @@ fn project_name(cwd: &str) -> String {
 /// Selection/filter state for the directory picker. Keeps absolute paths (used
 /// to create the workspace) and their `~`-abbreviated display form (used for
 /// matching and drawing), the fuzzy query, the ranked matches for the current
-/// query, and the selected index into those matches. Unit-tested.
+/// query, and the selected index into those matches.
 struct DirPicker {
     paths: Vec<String>,
     displays: Vec<String>,
@@ -1219,7 +1215,6 @@ fn draw(frame: &mut ratatui::Frame, screen: &Screen, prev_offset: &mut usize) {
     );
     frame.render_widget(preview_widget, chunks[1]);
 
-    // Bottom help/status bar.
     let bar = match status {
         Some(s) => Line::from(Span::styled(
             format!(" {s} "),

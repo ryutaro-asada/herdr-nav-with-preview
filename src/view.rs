@@ -878,14 +878,17 @@ mod tests {
         assert_eq!(scroll_offset(2, 20, 5, 0), 0);
         assert_eq!(scroll_offset(4, 20, 5, 0), 0);
         assert_eq!(scroll_offset(7, 20, 5, 5), 5); // 7 in [5,10): stay
-                                                   // Selection below the window: reveal at bottom.
+
+        // Selection below the window: reveal at bottom.
         assert_eq!(scroll_offset(5, 20, 5, 0), 1); // 5 >= 0+5 -> 1
         assert_eq!(scroll_offset(12, 20, 5, 5), 8); // 12 >= 10 -> 12+1-5
-                                                    // Selection above the window: reveal at top (the bug we fixed — moving
-                                                    // up should NOT drag the bottom; it stops as soon as selection shows).
+
+        // Selection above the window: reveal at top. Moving up must not drag
+        // the bottom; it stops as soon as the selection shows.
         assert_eq!(scroll_offset(3, 20, 5, 8), 3); // jumped up above window
         assert_eq!(scroll_offset(9, 20, 5, 10), 9); // one above window top
-                                                    // Never scroll past the end.
+
+        // Never scroll past the end.
         assert_eq!(scroll_offset(19, 20, 5, 0), 15);
         assert_eq!(scroll_offset(10, 20, 5, 99), 10); // prev clamped
     }
