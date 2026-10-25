@@ -55,12 +55,7 @@ impl Row {
     /// and tabs resolve to their first pane (the representative pane).
     pub fn representative_pane<'a>(&self, tree: &'a Tree) -> Option<&'a crate::tree::PaneNode> {
         match &self.kind {
-            RowKind::Pane { pane_id, .. } => tree
-                .workspaces
-                .iter()
-                .flat_map(|w| &w.tabs)
-                .flat_map(|t| &t.panes)
-                .find(|p| &p.pane_id == pane_id),
+            RowKind::Pane { pane_id, .. } => tree.panes().find(|p| &p.pane_id == pane_id),
             RowKind::Tab { tab_id, .. } => tree
                 .workspaces
                 .iter()
@@ -102,10 +97,7 @@ impl Row {
                 let mut plan = FocusPlan::tab(workspace_id, tab_id);
                 // Only add the agent-focus step when this pane hosts an agent.
                 let has_agent = tree
-                    .workspaces
-                    .iter()
-                    .flat_map(|w| &w.tabs)
-                    .flat_map(|t| &t.panes)
+                    .panes()
                     .find(|p| &p.pane_id == pane_id)
                     .and_then(agent_pane);
                 plan.pane_id = has_agent;

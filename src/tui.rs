@@ -88,35 +88,6 @@ fn selected_pane_id(view: &TreeView) -> Option<String> {
         .map(|p| p.pane_id.clone())
 }
 
-/// Rebuild the workspace > tab > pane tree from the live herdr state.
-fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
-    let mut tree = Tree::build(
-        api.workspaces()?,
-        api.tabs()?,
-        api.panes()?,
-        crate::herdr_client::own_pane_id().as_deref(),
-    );
-    tree.resolve_branches();
-    Ok(tree)
-}
-
-/// Rebuild the tree right after closing `closed_pane`, filtering out both the
-/// navigator's own overlay pane and the just-closed pane. Non-blocking: if
-/// herdr's `pane list` hasn't dropped the closed pane yet, we remove it here so
-/// no dead row is shown; the next poll converges on the real state.
-fn build_tree_excluding(api: &dyn HerdrApi, closed_pane: &str) -> Result<Tree> {
-    let mut panes = api.panes()?;
-    panes.retain(|p| p.pane_id != closed_pane);
-    let mut tree = Tree::build(
-        api.workspaces()?,
-        api.tabs()?,
-        panes,
-        crate::herdr_client::own_pane_id().as_deref(),
-    );
-    tree.resolve_branches();
-    Ok(tree)
-}
-
 /// Color for an agent status, matching herdr's semantics.
 fn status_color(status: Option<&str>) -> Color {
     match status {
@@ -188,12 +159,7 @@ fn status_chip(status: Option<&str>) -> Option<(String, Style)> {
 /// `(working, blocked, done)`.
 fn status_counts(tree: &Tree) -> (usize, usize, usize) {
     let mut c = (0, 0, 0);
-    for p in tree
-        .workspaces
-        .iter()
-        .flat_map(|w| &w.tabs)
-        .flat_map(|t| &t.panes)
-    {
+    for p in tree.panes() {
         match p.agent_status.as_deref() {
             Some("working") => c.0 += 1,
             Some("blocked") => c.1 += 1,
@@ -696,8 +662,9 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     });
     // Periodic tree refresh so agent statuses (and added/closed panes) stay
     // live while the navigator is open.
-    let tree_poller =
-        crate::poller::TreePoller::spawn(|| build_tree(&crate::herdr_client::CliHerdr::new()).ok());
+    let tree_poller = crate::poller::TreePoller::spawn(|| {
+        Tree::fetch(&crate::herdr_client::CliHerdr::new(), None).ok()
+    });
     // After we mutate the tree ourselves (create/close), ignore polled trees
     // for a moment: one built just before the change could resurrect a closed
     // pane or drop a just-created one.
@@ -812,7 +779,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         match api.create_workspace(&label, cwd.as_deref()) {
                                             Ok(new_id) => {
                                                 status = Some(format!("created workspace {label}"));
-                                                if let Ok(tree) = build_tree(api) {
+                                                if let Ok(tree) = Tree::fetch(api, None) {
                                                     view.set_tree(tree);
                                                 }
                                                 view.select_for_launch(Some(&new_id), None, None);
@@ -834,7 +801,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                                     let _ = api.rename_tab(&new_tab, &label);
                                                 }
                                                 status = Some("added tab".to_string());
-                                                if let Ok(tree) = build_tree(api) {
+                                                if let Ok(tree) = Tree::fetch(api, None) {
                                                     view.set_tree(tree);
                                                 }
                                                 view.select_for_launch(
@@ -879,7 +846,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         // Rebuild immediately (non-blocking) and
                                         // defensively drop the just-closed pane in
                                         // case herdr's list hasn't updated yet.
-                                        let fresh = build_tree_excluding(api, &pane_id);
+                                        let fresh = Tree::fetch(api, Some(&pane_id));
                                         if let Ok(tree) = &fresh {
                                             view.set_tree(tree.clone());
                                         }
@@ -899,12 +866,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                             if let (Some(hp), Ok(tree)) =
                                                 (home.focused_pane_id.as_deref(), &fresh)
                                             {
-                                                let still_there = tree
-                                                    .workspaces
-                                                    .iter()
-                                                    .flat_map(|w| &w.tabs)
-                                                    .flat_map(|t| &t.panes)
-                                                    .any(|p| p.pane_id == hp);
+                                                let still_there =
+                                                    tree.panes().any(|p| p.pane_id == hp);
                                                 if hp != pane_id && still_there {
                                                     if let Some(ws) = home.workspace_id.as_deref() {
                                                         let _ = api.focus_workspace(ws);
@@ -977,14 +940,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                     r.representative_pane(view.tree())
                                         .and_then(|p| p.cwd.clone())
                                 });
-                                let open_cwds: Vec<String> = view
-                                    .tree()
-                                    .workspaces
-                                    .iter()
-                                    .flat_map(|w| w.tabs.iter())
-                                    .flat_map(|t| t.panes.iter())
-                                    .filter_map(|p| p.cwd.clone())
-                                    .collect();
+                                let open_cwds: Vec<String> =
+                                    view.tree().panes().filter_map(|p| p.cwd.clone()).collect();
                                 let candidates = crate::dirs::collect_candidates(
                                     current_cwd.as_deref(),
                                     &open_cwds,

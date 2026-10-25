@@ -2,7 +2,9 @@
 //! herdr CLI, grouping tabs under workspaces and panes under tabs by their id
 //! fields. Ordering is stabilized by id so the UI is deterministic.
 
-use crate::herdr_client::{Pane, Tab, Workspace};
+use anyhow::Result;
+
+use crate::herdr_client::{HerdrApi, Pane, Tab, Workspace};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneNode {
@@ -81,34 +83,31 @@ impl Tree {
     /// Assemble a tree from the three flat lists. Panes are matched to tabs by
     /// `tab_id`; tabs are matched to workspaces by `workspace_id`. Tabs and
     /// panes are sorted by id; workspaces are grouped by similar name (see
-    /// `workspace_group_key`). `exclude_pane` drops one
-    /// pane from the tree — used to hide the navigator's own overlay pane so it
-    /// doesn't show up as a stray `wN:pM` row.
+    /// `workspace_group_key`). `exclude_pane` drops one pane from the tree,
+    /// used to hide the navigator's own overlay pane so it doesn't show up as
+    /// a stray `wN:pM` row.
     pub fn build(
-        workspaces: Vec<Workspace>,
-        tabs: Vec<Tab>,
-        panes: Vec<Pane>,
+        mut workspaces: Vec<Workspace>,
+        mut tabs: Vec<Tab>,
+        mut panes: Vec<Pane>,
         exclude_pane: Option<&str>,
     ) -> Self {
-        let mut panes = panes;
         if let Some(ex) = exclude_pane {
             panes.retain(|p| p.pane_id != ex);
         }
         panes.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
 
-        let mut tabs = tabs;
         tabs.sort_by(|a, b| a.tab_id.cmp(&b.tab_id));
 
         // Group similarly named workspaces together ("api", "api-2",
         // "api (main)" sit next to each other), groups alphabetically, then
         // by herdr's workspace number within a group.
-        let mut workspaces = workspaces;
-        workspaces.sort_by(|a, b| {
-            let ka = workspace_group_key(&a.label, &a.workspace_id);
-            let kb = workspace_group_key(&b.label, &b.workspace_id);
-            ka.cmp(&kb)
-                .then(a.number.cmp(&b.number))
-                .then(a.workspace_id.cmp(&b.workspace_id))
+        workspaces.sort_by_cached_key(|w| {
+            (
+                workspace_group_key(&w.label, &w.workspace_id),
+                w.number,
+                w.workspace_id.clone(),
+            )
         });
 
         let ws_nodes = workspaces
@@ -147,11 +146,11 @@ impl Tree {
                     .and_then(|t| t.panes.first())
                     .and_then(|p| p.cwd.clone());
                 WorkspaceNode {
-                    workspace_id: w.workspace_id.clone(),
-                    label: w.label.clone(),
+                    workspace_id: w.workspace_id,
+                    label: w.label,
                     number: w.number,
                     focused: w.focused,
-                    agent_status: w.agent_status.clone(),
+                    agent_status: w.agent_status,
                     cwd,
                     branch: None,
                     tabs: tab_nodes,
@@ -164,10 +163,37 @@ impl Tree {
         }
     }
 
+    /// Fetch the live tree from herdr and resolve git branches. The
+    /// navigator's own pane is always hidden; `also_exclude` hides one more
+    /// (a just-closed pane that `pane list` may still report).
+    pub fn fetch(api: &dyn HerdrApi, also_exclude: Option<&str>) -> Result<Self> {
+        let workspaces = api.workspaces()?;
+        let tabs = api.tabs()?;
+        let mut panes = api.panes()?;
+        if let Some(ex) = also_exclude {
+            panes.retain(|p| p.pane_id != ex);
+        }
+        let mut tree = Self::build(
+            workspaces,
+            tabs,
+            panes,
+            crate::herdr_client::own_pane_id().as_deref(),
+        );
+        tree.resolve_branches();
+        Ok(tree)
+    }
+
+    /// Every pane in the tree, in display order.
+    pub fn panes(&self) -> impl Iterator<Item = &PaneNode> {
+        self.workspaces
+            .iter()
+            .flat_map(|w| &w.tabs)
+            .flat_map(|t| &t.panes)
+    }
+
     /// Resolve each workspace's git branch from its cwd (one git call per
-    /// workspace). Call once after building; `rows()` then renders the cached
-    /// branch without any further git invocations.
-    pub fn resolve_branches(&mut self) {
+    /// workspace), so rendering never has to invoke git.
+    fn resolve_branches(&mut self) {
         for w in &mut self.workspaces {
             w.branch = w.cwd.as_deref().and_then(crate::herdr_client::git_branch);
         }

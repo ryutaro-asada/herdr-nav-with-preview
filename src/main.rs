@@ -64,8 +64,7 @@ fn main() -> Result<()> {
             }
         }
         Some("--dump-tree") => {
-            let api = CliHerdr::new();
-            let tree = build_tree(&api)?;
+            let tree = load_or_hint(|| Tree::fetch(&CliHerdr::new(), None))?;
             print!("{}", tree.to_indented_text());
         }
         Some(other) => {
@@ -76,21 +75,6 @@ fn main() -> Result<()> {
         None => run_tui()?,
     }
     Ok(())
-}
-
-/// Build the full tree, adding a helpful hint if the herdr CLI can't be reached.
-fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
-    let workspaces = load_or_hint(|| api.workspaces())?;
-    let tabs = load_or_hint(|| api.tabs())?;
-    let panes = load_or_hint(|| api.panes())?;
-    let mut tree = Tree::build(
-        workspaces,
-        tabs,
-        panes,
-        herdr_client::own_pane_id().as_deref(),
-    );
-    tree.resolve_branches();
-    Ok(tree)
 }
 
 /// Wrap a herdr call with a clear hint when the binary itself can't be found or
@@ -107,10 +91,9 @@ fn load_or_hint<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 
 fn run_tui() -> Result<()> {
     let api = CliHerdr::new();
-    let tree = build_tree(&api)?;
+    let tree = load_or_hint(|| Tree::fetch(&api, None))?;
     let mut view = TreeView::new(tree);
 
-    // Preselect the row for the pane the user was on when they opened nav.
     let ctx = herdr_client::LaunchContext::from_env();
     view.select_for_launch(
         ctx.workspace_id.as_deref(),
