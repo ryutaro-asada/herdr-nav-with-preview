@@ -724,8 +724,6 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
         }
         if dirty {
             let rows = view.rows();
-            let selected = view.selected_index();
-            let title = preview_title(&rows, selected);
             // In text-entry mode, show the prompt (with a cursor) in the bar;
             // otherwise show the current status/help.
             let bar_text = if searching {
@@ -744,21 +742,17 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                 })
             };
             let bar = bar_text.as_deref().or(status.as_deref());
-            let mut scroll_ref = scroll;
-            guard.terminal().draw(|frame| {
-                draw(
-                    frame,
-                    &rows,
-                    selected,
-                    &preview_text,
-                    &title,
-                    bar,
-                    &mut scroll_ref,
-                    tick,
-                    counts,
-                )
-            })?;
-            scroll = scroll_ref;
+            let screen = Screen {
+                rows: &rows,
+                selected: view.selected_index(),
+                preview: &preview_text,
+                status: bar,
+                tick,
+                counts,
+            };
+            guard
+                .terminal()
+                .draw(|frame| draw(frame, &screen, &mut scroll))?;
             dirty = false;
         }
 
@@ -1160,21 +1154,31 @@ fn preview_title(rows: &[crate::view::Row], selected: usize) -> String {
     }
 }
 
-/// Draw the two-pane layout: tree on the left, preview on the right, plus a
-/// help/status bar at the bottom. `rows` is precomputed by the caller so the
-/// tree is only flattened once per frame, and `preview_text` is the already
+/// One frame's worth of data for `draw`. `rows` is precomputed by the caller
+/// so the tree is only flattened once per frame, and `preview` is the already
 /// ANSI-parsed preview so parsing is not repeated every frame.
-pub fn draw(
-    frame: &mut ratatui::Frame,
-    rows: &[crate::view::Row],
+struct Screen<'a> {
+    rows: &'a [crate::view::Row],
     selected: usize,
-    preview_text: &Text<'static>,
-    preview_title: &str,
-    status: Option<&str>,
-    prev_offset: &mut usize,
+    preview: &'a Text<'static>,
+    /// Status or prompt text for the bottom bar; `None` shows the key help.
+    status: Option<&'a str>,
     tick: usize,
     counts: (usize, usize, usize),
-) {
+}
+
+/// Draw the two-pane layout: tree on the left, preview on the right, plus a
+/// help/status bar at the bottom. `prev_offset` carries the tree's scroll
+/// offset between frames.
+fn draw(frame: &mut ratatui::Frame, screen: &Screen, prev_offset: &mut usize) {
+    let Screen {
+        rows,
+        selected,
+        preview,
+        status,
+        tick,
+        counts,
+    } = *screen;
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -1218,12 +1222,12 @@ pub fn draw(
     );
     frame.render_widget(tree_widget, chunks[0]);
 
-    let preview_widget = Paragraph::new(preview_text.clone()).block(
+    let preview_widget = Paragraph::new(preview.clone()).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
             .title(Span::styled(
-                preview_title.to_string(),
+                preview_title(rows, selected),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),

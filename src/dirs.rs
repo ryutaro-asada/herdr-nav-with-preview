@@ -572,7 +572,7 @@ mod tests {
             std::fs::create_dir_all(base.join(d)).unwrap();
         }
         let root = base.join("root").to_str().unwrap().to_string();
-        let got = scan_roots(&[root.clone()], 2);
+        let got = scan_roots(std::slice::from_ref(&root), 2);
         let rel: Vec<String> = got
             .iter()
             .map(|p| p.strip_prefix(&format!("{root}/")).unwrap().to_string())
