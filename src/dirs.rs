@@ -38,12 +38,24 @@ const DEFAULT_DEPTH: usize = 5;
 const MAX_SCANNED: usize = 50_000;
 
 /// Directory names never descended into or listed.
-const SKIP_NAMES: &[&str] = &["node_modules", "target", "vendor", "dist", "build", "__pycache__"];
+const SKIP_NAMES: &[&str] = &[
+    "node_modules",
+    "target",
+    "vendor",
+    "dist",
+    "build",
+    "__pycache__",
+];
 
 /// Directory names skipped only directly under `$HOME` (system/media folders
 /// that are never project roots, and that macOS guards with privacy prompts).
 const SKIP_HOME_CHILDREN: &[&str] = &[
-    "Library", "Applications", "Movies", "Music", "Pictures", "Public",
+    "Library",
+    "Applications",
+    "Movies",
+    "Music",
+    "Pictures",
+    "Public",
 ];
 
 /// Expand a leading `~` / `~/` to the user's home directory. Other paths are
@@ -131,8 +143,6 @@ pub fn order_candidates(current: Option<&str>, others: &[String]) -> Vec<String>
     }
     out
 }
-
-// --- fuzzy ranking (nucleo-matcher) ----------------------------------------
 
 /// Highlight positions are computed only for this many top results (the
 /// visible list is never taller), keeping each keystroke cheap on large lists.
@@ -235,8 +245,6 @@ pub fn filter_candidates(candidates: &[String], query: &str) -> Vec<String> {
         .collect()
 }
 
-// --- filesystem collection --------------------------------------------------
-
 /// Should the walker skip (not list, not descend into) this directory?
 /// `home` enables skipping macOS-style media/system folders directly under it.
 fn skip_dir(path: &Path, home: Option<&Path>) -> bool {
@@ -278,7 +286,9 @@ pub fn scan_roots(roots: &[String], depth: usize) -> Vec<String> {
         .parents(false)
         .follow_links(false)
         .filter_entry(move |e| {
-            !(e.file_type().is_some_and(|t| t.is_dir()) && e.depth() > 0 && skip_dir(e.path(), home.as_deref()))
+            !(e.file_type().is_some_and(|t| t.is_dir())
+                && e.depth() > 0
+                && skip_dir(e.path(), home.as_deref()))
         });
 
     let found: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
@@ -391,16 +401,25 @@ mod tests {
 
     #[test]
     fn abbreviates_home() {
-        assert_eq!(abbreviate_home("/home/u/repos/x", Some("/home/u")), "~/repos/x");
+        assert_eq!(
+            abbreviate_home("/home/u/repos/x", Some("/home/u")),
+            "~/repos/x"
+        );
         assert_eq!(abbreviate_home("/home/u", Some("/home/u/")), "~");
-        assert_eq!(abbreviate_home("/home/user2/x", Some("/home/u")), "/home/user2/x");
+        assert_eq!(
+            abbreviate_home("/home/user2/x", Some("/home/u")),
+            "/home/user2/x"
+        );
         assert_eq!(abbreviate_home("/opt/x", None), "/opt/x");
     }
 
     #[test]
     fn parses_roots_and_depth() {
         let toml = "[new_workspace]\nroots = [\"~/repos\", \"/opt/src\"]\ndepth = 3\n";
-        assert_eq!(parse_roots(toml, Some("/home/u")).unwrap(), s(&["/home/u/repos", "/opt/src"]));
+        assert_eq!(
+            parse_roots(toml, Some("/home/u")).unwrap(),
+            s(&["/home/u/repos", "/opt/src"])
+        );
         assert_eq!(parse_depth(toml), Some(3));
         assert_eq!(parse_depth("roots = []"), None);
     }
@@ -421,7 +440,10 @@ mod tests {
     fn orders_current_first_and_dedups() {
         let out = order_candidates(Some("/cwd/"), &s(&["/a", "/b/", "/a", "/cwd"]));
         assert_eq!(out, s(&["/cwd", "/a", "/b"]));
-        assert_eq!(order_candidates(None, &s(&["/a", "/a", "/b"])), s(&["/a", "/b"]));
+        assert_eq!(
+            order_candidates(None, &s(&["/a", "/a", "/b"])),
+            s(&["/a", "/b"])
+        );
     }
 
     #[test]
@@ -443,8 +465,8 @@ mod tests {
 
     #[test]
     fn ranks_basename_contiguous_match_first() {
-        // The bug: "sptv" used to match these junk entries via the home
-        // prefix and alphabetical order put them first.
+        // Entries that only match "sptv" through scattered characters must
+        // not outrank the real project.
         let items = s(&[
             "~/repos/jumpstart-vite",
             "~/repos/tview",
@@ -452,7 +474,10 @@ mod tests {
             "~/job/tmp1/sptv-video",
         ]);
         let ranked = filter_candidates(&items, "sptv");
-        assert_eq!(ranked.first().map(String::as_str), Some("~/job/tmp1/sptv-video"));
+        assert_eq!(
+            ranked.first().map(String::as_str),
+            Some("~/job/tmp1/sptv-video")
+        );
         // Junk entries without the chars in order are filtered out.
         assert!(!ranked.contains(&"~/repos/tview".to_string()));
     }
@@ -473,21 +498,28 @@ mod tests {
 
     #[test]
     fn rank_prefers_word_boundary_initials() {
-        let items = s(&["~/repos/herdr-plugin-examples", "~/repos/herder-nav-with-preview"]);
+        let items = s(&[
+            "~/repos/herdr-plugin-examples",
+            "~/repos/herder-nav-with-preview",
+        ]);
         let ranked = filter_candidates(&items, "hnwp");
         assert_eq!(ranked[0], "~/repos/herder-nav-with-preview");
     }
 
     #[test]
     fn fzf_query_syntax() {
-        let items = s(&["~/job/tmp1/sptv-video", "~/job/tmp1/sptv-video/cms", "~/repos/sptv"]);
+        let items = s(&[
+            "~/job/tmp1/sptv-video",
+            "~/job/tmp1/sptv-video/cms",
+            "~/repos/sptv",
+        ]);
         // `$` anchors to the end, `^` to the start, `!` negates.
-        assert_eq!(filter_candidates(&items, "video$"), s(&["~/job/tmp1/sptv-video"]));
-        assert_eq!(filter_candidates(&items, "^~/repos"), s(&["~/repos/sptv"]));
         assert_eq!(
-            filter_candidates(&items, "sptv !job"),
-            s(&["~/repos/sptv"])
+            filter_candidates(&items, "video$"),
+            s(&["~/job/tmp1/sptv-video"])
         );
+        assert_eq!(filter_candidates(&items, "^~/repos"), s(&["~/repos/sptv"]));
+        assert_eq!(filter_candidates(&items, "sptv !job"), s(&["~/repos/sptv"]));
     }
 
     #[test]
@@ -508,9 +540,17 @@ mod tests {
 
     #[test]
     fn sibling_roots_skip_home_and_root() {
-        let cwds = s(&["/home/u/job/tmp1/sptv-video", "/home/u/memo", "/home/u", "/home/u/job/tmp1/nhk"]);
+        let cwds = s(&[
+            "/home/u/job/tmp1/sptv-video",
+            "/home/u/memo",
+            "/home/u",
+            "/home/u/job/tmp1/nhk",
+        ]);
         // /home/u (home) and /home (ancestor of home) are too broad.
-        assert_eq!(sibling_roots(&cwds, Some("/home/u")), s(&["/home/u/job/tmp1"]));
+        assert_eq!(
+            sibling_roots(&cwds, Some("/home/u")),
+            s(&["/home/u/job/tmp1"])
+        );
     }
 
     #[test]
@@ -528,7 +568,7 @@ mod tests {
             std::fs::create_dir_all(base.join(d)).unwrap();
         }
         let root = base.join("root").to_str().unwrap().to_string();
-        let got = scan_roots(&[root.clone()], 2);
+        let got = scan_roots(std::slice::from_ref(&root), 2);
         let rel: Vec<String> = got
             .iter()
             .map(|p| p.strip_prefix(&format!("{root}/")).unwrap().to_string())

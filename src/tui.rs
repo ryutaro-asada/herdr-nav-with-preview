@@ -3,11 +3,11 @@
 //! panic. Rendering and key handling delegate to `TreeView` (pure logic).
 
 use std::io::{self, Stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -23,7 +23,7 @@ use ratatui::{
 use crate::herdr_client::HerdrApi;
 use crate::poller::{PollRequest, PollState, Poller};
 use crate::tree::Tree;
-use crate::view::{RowKind, TreeView};
+use crate::view::{Row, RowKind, TreeView};
 
 /// How long to wait for a key event before checking for preview updates.
 const EVENT_POLL: Duration = Duration::from_millis(30);
@@ -73,6 +73,30 @@ pub enum LoopOutcome {
     Jumped,
 }
 
+/// Input mode of the event loop; key handling depends on it.
+enum Mode {
+    Normal,
+    /// Incremental search (`/`).
+    Search,
+    /// Name entry for a new workspace or tab.
+    Prompt {
+        target: InputTarget,
+        text: String,
+    },
+    /// `x` armed a close of this pane; the next key confirms or cancels.
+    ConfirmClose {
+        pane_id: String,
+    },
+}
+
+/// What the event loop does after a key press.
+enum Flow {
+    Redraw,
+    /// The key has no binding; nothing changed, so skip the redraw.
+    Unhandled,
+    Exit(LoopOutcome),
+}
+
 /// What the active name-entry prompt will create when confirmed.
 enum InputTarget {
     /// Create a new workspace with the entered label in this cwd.
@@ -84,36 +108,8 @@ enum InputTarget {
 /// Resolve the pane id to preview for the currently selected row.
 fn selected_pane_id(view: &TreeView) -> Option<String> {
     let row = view.selected_row()?;
-    row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
-}
-
-/// Rebuild the workspace > tab > pane tree from the live herdr state.
-fn build_tree(api: &dyn HerdrApi) -> Result<Tree> {
-    let mut tree = Tree::build(
-        api.workspaces()?,
-        api.tabs()?,
-        api.panes()?,
-        crate::herdr_client::own_pane_id().as_deref(),
-    );
-    tree.resolve_branches();
-    Ok(tree)
-}
-
-/// Rebuild the tree right after closing `closed_pane`, filtering out both the
-/// navigator's own overlay pane and the just-closed pane. Non-blocking: if
-/// herdr's `pane list` hasn't dropped the closed pane yet, we remove it here so
-/// no dead row is shown; the next poll converges on the real state.
-fn build_tree_excluding(api: &dyn HerdrApi, closed_pane: &str) -> Result<Tree> {
-    let mut panes = api.panes()?;
-    panes.retain(|p| p.pane_id != closed_pane);
-    let mut tree = Tree::build(
-        api.workspaces()?,
-        api.tabs()?,
-        panes,
-        crate::herdr_client::own_pane_id().as_deref(),
-    );
-    tree.resolve_branches();
-    Ok(tree)
+    row.representative_pane(view.tree())
+        .map(|p| p.pane_id.clone())
 }
 
 /// Color for an agent status, matching herdr's semantics.
@@ -126,6 +122,9 @@ fn status_color(status: Option<&str>) -> Color {
         _ => Color::DarkGray,
     }
 }
+
+/// Background of the selected row, like herdr's native cursor.
+const SELECTED_BG: Color = Color::Rgb(68, 80, 120);
 
 /// Braille spinner frames for the `working` state.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -145,8 +144,6 @@ fn status_glyph(status: Option<&str>, tick: usize) -> &'static str {
     }
 }
 
-/// Per-kind color: workspace blue, tab purple, pane peach. Chosen to stay
-/// distinct from the agent-status dot colors (yellow/red/green/cyan).
 /// Is this an "active" status worth flagging loudly (working/blocked/done)?
 fn is_notable_status(status: Option<&str>) -> bool {
     matches!(status, Some("working" | "blocked" | "done"))
@@ -187,7 +184,7 @@ fn status_chip(status: Option<&str>) -> Option<(String, Style)> {
 /// `(working, blocked, done)`.
 fn status_counts(tree: &Tree) -> (usize, usize, usize) {
     let mut c = (0, 0, 0);
-    for p in tree.workspaces.iter().flat_map(|w| &w.tabs).flat_map(|t| &t.panes) {
+    for p in tree.panes() {
         match p.agent_status.as_deref() {
             Some("working") => c.0 += 1,
             Some("blocked") => c.1 += 1,
@@ -198,6 +195,8 @@ fn status_counts(tree: &Tree) -> (usize, usize, usize) {
     c
 }
 
+/// Per-kind color: workspace blue, tab purple, pane peach. Chosen to stay
+/// distinct from the agent-status dot colors (yellow/red/green/cyan).
 fn kind_color(kind: &RowKind) -> Color {
     match kind {
         RowKind::Workspace { .. } => Color::Rgb(130, 170, 255),
@@ -209,12 +208,8 @@ fn kind_color(kind: &RowKind) -> Color {
 /// Build a styled line for one tree row, herdr-navigator style:
 /// `▎ <tree-glyph> <status-dot> <name> [agent]`. When selected, the whole row
 /// is filled with a solid highlight background across the full width.
-fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -> Line<'static> {
-    use crate::view::RowKind;
-
-    // Solid fill behind the selected row, like herdr's native cursor.
-    let sel_bg = Color::Rgb(68, 80, 120);
-    let base = |s: Style| if selected { s.bg(sel_bg) } else { s };
+fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'static> {
+    let base = |s: Style| if selected { s.bg(SELECTED_BG) } else { s };
 
     let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -222,7 +217,7 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
     if selected {
         spans.push(Span::styled(
             "▏",
-            Style::default().fg(Color::Cyan).bg(sel_bg),
+            Style::default().fg(Color::Cyan).bg(SELECTED_BG),
         ));
     } else {
         spans.push(Span::raw(" "));
@@ -236,8 +231,6 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
     // (ancestor was the last child), then the node's own branch "├─"/"└─".
     if row.depth > 0 {
         let mut tree_prefix = String::new();
-        // Skip the workspace-level ancestor (index 0); start the vertical lines
-        // from the tab level downward.
         for &anc_last in row.ancestors_last.iter().skip(1) {
             tree_prefix.push_str(if anc_last { "  " } else { "│ " });
         }
@@ -249,10 +242,12 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
         ));
     }
 
-    // Expand/collapse caret for expandable nodes.
     if row.expandable {
         let caret = if row.expanded { "▾ " } else { "▸ " };
-        spans.push(Span::styled(caret, base(Style::default().fg(Color::DarkGray))));
+        spans.push(Span::styled(
+            caret,
+            base(Style::default().fg(Color::DarkGray)),
+        ));
     }
 
     // Kind icon so workspaces, tabs, and panes are distinguishable at a glance;
@@ -263,7 +258,10 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
         RowKind::Tab { .. } => "▪ ",
         RowKind::Pane { .. } => "› ",
     };
-    spans.push(Span::styled(kind_icon, base(Style::default().fg(kind_color))));
+    spans.push(Span::styled(
+        kind_icon,
+        base(Style::default().fg(kind_color)),
+    ));
 
     // Agent status glyph. Pane rows always show it; workspace/tab rows show
     // herdr's aggregated status only when notable (working/blocked/done), so
@@ -275,7 +273,10 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
         if is_notable_status(status) {
             st = st.add_modifier(Modifier::BOLD);
         }
-        spans.push(Span::styled(format!("{} ", status_glyph(status, tick)), base(st)));
+        spans.push(Span::styled(
+            format!("{} ", status_glyph(status, tick)),
+            base(st),
+        ));
     }
 
     // The name, in the kind's color. Workspaces bold; the focused workspace is
@@ -291,7 +292,6 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
         name_style = name_style.fg(Color::White).add_modifier(Modifier::BOLD);
     }
 
-    // Width already consumed by the prefix spans.
     let used: usize = spans
         .iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
@@ -308,10 +308,7 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
         .map(|(t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()) + 1)
         .unwrap_or(0);
     let avail = width.saturating_sub(used);
-    let name = truncate_display(
-        &row.name,
-        avail.saturating_sub(badge_w + chip_w).max(1),
-    );
+    let name = truncate_display(&row.name, avail.saturating_sub(badge_w + chip_w).max(1));
     let name_w = unicode_width::UnicodeWidthStr::width(name.as_str());
     spans.push(Span::styled(name, base(name_style)));
     if let Some(badge) = agent_badge {
@@ -350,17 +347,13 @@ fn unique_label(base: &str, existing: &[&str]) -> String {
 /// herdr's native workspace auto-naming. Empty if the path has no component.
 fn project_name(cwd: &str) -> String {
     let trimmed = cwd.trim_end_matches('/');
-    trimmed
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .to_string()
+    trimmed.rsplit('/').next().unwrap_or("").to_string()
 }
 
 /// Selection/filter state for the directory picker. Keeps absolute paths (used
 /// to create the workspace) and their `~`-abbreviated display form (used for
 /// matching and drawing), the fuzzy query, the ranked matches for the current
-/// query, and the selected index into those matches. Unit-tested.
+/// query, and the selected index into those matches.
 struct DirPicker {
     paths: Vec<String>,
     displays: Vec<String>,
@@ -453,11 +446,15 @@ fn pick_directory(guard: &mut TerminalGuard, candidates: Vec<String>) -> Result<
     loop {
         if dirty {
             let rows = picker.rows();
-            let selected = picker.selected;
-            let query = picker.query.clone();
-            let total = picker.paths.len();
             guard.terminal().draw(|frame| {
-                draw_dir_picker(frame, &rows, selected, &query, total, &mut scroll)
+                draw_dir_picker(
+                    frame,
+                    &rows,
+                    picker.selected,
+                    &picker.query,
+                    picker.paths.len(),
+                    &mut scroll,
+                )
             })?;
             dirty = false;
         }
@@ -496,7 +493,10 @@ fn fit_tail(s: &str, width: usize) -> (bool, Vec<(char, usize)>) {
     let chars: Vec<char> = s.chars().collect();
     let total: usize = chars.iter().map(|c| c.width().unwrap_or(0)).sum();
     if total <= width {
-        return (false, chars.into_iter().enumerate().map(|(i, c)| (c, i)).collect());
+        return (
+            false,
+            chars.into_iter().enumerate().map(|(i, c)| (c, i)).collect(),
+        );
     }
     let budget = width.saturating_sub(1);
     let mut used = 0;
@@ -539,7 +539,6 @@ fn draw_dir_picker(
     let offset = crate::view::scroll_offset(selected, rows.len(), inner_h, *scroll);
     *scroll = offset;
 
-    let sel_bg = Color::Rgb(68, 80, 120);
     let mut lines: Vec<Line> = Vec::new();
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -550,7 +549,7 @@ fn draw_dir_picker(
     for (i, (display, positions)) in rows.iter().enumerate().skip(offset).take(inner_h.max(1)) {
         let is_sel = i == selected;
         let base = if is_sel {
-            Style::default().bg(sel_bg).fg(Color::White)
+            Style::default().bg(SELECTED_BG).fg(Color::White)
         } else {
             Style::default()
         };
@@ -558,7 +557,11 @@ fn draw_dir_picker(
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(
             if is_sel { "▏ " } else { "  " },
-            if is_sel { Style::default().fg(Color::Cyan).bg(sel_bg) } else { base },
+            if is_sel {
+                Style::default().fg(Color::Cyan).bg(SELECTED_BG)
+            } else {
+                base
+            },
         ));
         let (cut, visible) = fit_tail(display, inner_w.saturating_sub(2).max(1));
         if cut {
@@ -566,7 +569,11 @@ fn draw_dir_picker(
         }
         let mut used = 2 + usize::from(cut);
         for (c, idx) in visible {
-            let style = if positions.binary_search(&idx).is_ok() { hl } else { base };
+            let style = if positions.binary_search(&idx).is_ok() {
+                hl
+            } else {
+                base
+            };
             spans.push(Span::styled(c.to_string(), style));
             used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         }
@@ -582,14 +589,24 @@ fn draw_dir_picker(
             .border_style(Style::default().fg(Color::DarkGray))
             .title(Span::styled(
                 " new workspace — pick a directory ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )),
     );
     frame.render_widget(list, outer[0]);
 
     let bar = Line::from(vec![
-        Span::styled(" > ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{query}\u{2588}"), Style::default().fg(Color::White)),
+        Span::styled(
+            " > ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{query}\u{2588}"),
+            Style::default().fg(Color::White),
+        ),
         Span::styled(
             format!(
                 "   {}/{}   ↑↓/^n^p move  ^u clear  ⏎ choose  Esc cancel",
@@ -636,57 +653,32 @@ fn truncate_display(s: &str, max_width: usize) -> String {
 /// results. The `Poller` is stopped and joined when it drops at scope exit.
 pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     let mut guard = TerminalGuard::new()?;
+    let mut app = App::new(view, api);
 
     let mut poll_state = PollState::new();
-    let mut current_pane = selected_pane_id(view);
-    let generation = poll_state.generation();
-    // The preview is parsed to colored Text on the poller thread; the UI only
-    // stores and renders it.
-    let mut preview_text: Text<'static> = Text::default();
-    let mut status: Option<String> = None;
-    // Pane id armed for close; set when `x` is first pressed on a pane.
-    let mut confirm_close: Option<String> = None;
-    // The tab the overlay itself lives in. Closing panes in this tab would
-    // take the navigator down with it, so we refuse to close them.
-    let own_tab = crate::herdr_client::own_tab_id();
-    // When `Some`, we're in the name-entry mode and this holds the input buffer.
-    let mut input_buf: Option<String> = None;
-    // What the current prompt will create (workspace or tab).
-    let mut input_target: Option<InputTarget> = None;
-    // True while the incremental search prompt is active (`/`).
-    let mut searching = false;
-
-    // The pane/tab/workspace the user was on when they opened the navigator.
-    // After a destructive action (close) herdr may re-assign focus within our
-    // home workspace, so we re-assert this focus to keep the user's place.
-    let home = crate::herdr_client::LaunchContext::from_env();
-
     let poller = Poller::spawn(PollRequest {
-        generation,
-        pane_id: current_pane.clone(),
+        generation: poll_state.generation(),
+        pane_id: app.current_pane.clone(),
     });
     // Periodic tree refresh so agent statuses (and added/closed panes) stay
     // live while the navigator is open.
     let tree_poller = crate::poller::TreePoller::spawn(|| {
-        build_tree(&crate::herdr_client::CliHerdr::new()).ok()
+        Tree::fetch(&crate::herdr_client::CliHerdr::new(), None).ok()
     });
-    // After we mutate the tree ourselves (create/close), ignore polled trees
-    // for a moment: one built just before the change could resurrect a closed
-    // pane or drop a just-created one.
-    let mut tree_hold_until = std::time::Instant::now();
+    // The preview is parsed to colored Text on the poller thread; the UI only
+    // stores and renders it.
+    let mut preview_text: Text<'static> = Text::default();
 
     // Only redraw when something actually changed. This keeps key handling
     // snappy and avoids re-flattening the tree / re-parsing ANSI every tick.
     let mut dirty = true;
-    // Persisted vertical scroll offset for the tree (sticky scrolling).
-    let mut scroll: usize = 0;
     // Spinner animation: the frame index derives from elapsed time, and we
     // redraw on each new frame only while some agent is working.
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let mut tick: usize = 0;
 
     loop {
-        let counts = status_counts(view.tree());
+        let counts = status_counts(app.view.tree());
         let now_tick = (started.elapsed().as_millis() / SPINNER_INTERVAL.as_millis()) as usize;
         if now_tick != tick {
             tick = now_tick;
@@ -695,361 +687,17 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             }
         }
         if dirty {
-            let rows = view.rows();
-            let selected = view.selected_index();
-            let title = preview_title(&rows, selected);
-            // In text-entry mode, show the prompt (with a cursor) in the bar;
-            // otherwise show the current status/help.
-            let bar_text = if searching {
-                Some(format!("/{}\u{2588}  ({} matches)", view.query(), rows.len()))
-            } else {
-                input_buf.as_ref().map(|b| {
-                    let what = match input_target {
-                        Some(InputTarget::Tab { .. }) => "new tab name (empty = auto)",
-                        _ => "new workspace name",
-                    };
-                    format!("{what}: {b}\u{2588}")
-                })
-            };
-            let bar = bar_text.as_deref().or(status.as_deref());
-            let mut scroll_ref = scroll;
-            guard.terminal().draw(|frame| {
-                draw(
-                    frame,
-                    &rows,
-                    selected,
-                    &preview_text,
-                    &title,
-                    bar,
-                    &mut scroll_ref,
-                    tick,
-                    counts,
-                )
-            })?;
-            scroll = scroll_ref;
+            app.render(&mut guard, &preview_text, tick, counts)?;
             dirty = false;
         }
 
         if event::poll(EVENT_POLL)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    dirty = true;
-
-                    // Incremental search mode (entered with `/`) takes top
-                    // priority: printable keys edit the query and filter live,
-                    // but Up/Down still move within the results, and Enter jumps.
-                    if searching {
-                        match key.code {
-                            KeyCode::Esc => {
-                                searching = false;
-                                view.clear_query();
-                            }
-                            KeyCode::Enter => {
-                                // Confirm the search: keep the filtered view but
-                                // leave edit mode so normal keys work. If a row
-                                // is selected, jump to it (same as normal Enter).
-                                searching = false;
-                                if let Some(row) = view.selected_row() {
-                                    let plan = row.focus_plan(view.tree());
-                                    match api.apply_focus(&plan) {
-                                        Ok(()) => return Ok(LoopOutcome::Jumped),
-                                        Err(e) => status = Some(format!("focus failed: {e}")),
-                                    }
-                                }
-                            }
-                            KeyCode::Backspace => view.pop_query_char(),
-                            KeyCode::Down => view.move_down(),
-                            KeyCode::Up => view.move_up(),
-                            // Ctrl+n / Ctrl+p move within results (fzf-style).
-                            // Must be handled before the plain Char arm so the
-                            // letters don't get typed into the query.
-                            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                view.move_down()
-                            }
-                            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                view.move_up()
-                            }
-                            KeyCode::Char(c) => view.push_query_char(c),
-                            _ => {}
-                        }
-                    } else if let Some(buf) = input_buf.as_mut() {
-                        match key.code {
-                            KeyCode::Enter => {
-                                let label = buf.trim().to_string();
-                                match input_target.take() {
-                                    Some(InputTarget::Workspace { cwd }) => {
-                                        let label = if label.is_empty() {
-                                            view.tree().next_workspace_number().to_string()
-                                        } else {
-                                            label
-                                        };
-                                        match api.create_workspace(&label, cwd.as_deref()) {
-                                            Ok(new_id) => {
-                                                status =
-                                                    Some(format!("created workspace {label}"));
-                                                if let Ok(tree) = build_tree(api) {
-                                                    view.set_tree(tree);
-                                                }
-                                                view.select_for_launch(Some(&new_id), None, None);
-                                                scroll = 0;
-                                                current_pane = None;
-                                                tree_hold_until = hold_after_mutation();
-                                            }
-                                            Err(e) => {
-                                                status = Some(format!("create failed: {e}"));
-                                            }
-                                        }
-                                    }
-                                    Some(InputTarget::Tab { workspace_id }) => {
-                                        // herdr names tabs by number; the entered
-                                        // label is only applied when non-empty.
-                                        match api.create_tab(&workspace_id) {
-                                            Ok(new_tab) => {
-                                                if !label.is_empty() {
-                                                    let _ = api.rename_tab(&new_tab, &label);
-                                                }
-                                                status = Some("added tab".to_string());
-                                                if let Ok(tree) = build_tree(api) {
-                                                    view.set_tree(tree);
-                                                }
-                                                view.select_for_launch(
-                                                    Some(&workspace_id),
-                                                    Some(&new_tab),
-                                                    None,
-                                                );
-                                                current_pane = None;
-                                                tree_hold_until = hold_after_mutation();
-                                            }
-                                            Err(e) => {
-                                                status = Some(format!("add tab failed: {e}"));
-                                            }
-                                        }
-                                    }
-                                    None => {}
-                                }
-                                input_buf = None;
-                            }
-                            KeyCode::Esc => {
-                                status = None;
-                                input_buf = None;
-                                input_target = None;
-                            }
-                            KeyCode::Backspace => {
-                                buf.pop();
-                            }
-                            KeyCode::Char(c) => {
-                                buf.push(c);
-                            }
-                            _ => {}
-                        }
-                    } else if let Some(pane_id) = confirm_close.clone() {
-                        // When a close is pending, intercept keys as a yes/no
-                        // confirmation (tmux style): y or Enter confirms,
-                        // anything else cancels.
-                        match key.code {
-                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                                match api.close_pane(&pane_id) {
-                                    Ok(()) => {
-                                        status = Some(format!("closed {pane_id}"));
-                                        // Rebuild immediately (non-blocking) and
-                                        // defensively drop the just-closed pane in
-                                        // case herdr's list hasn't updated yet.
-                                        let fresh = build_tree_excluding(api, &pane_id);
-                                        if let Ok(tree) = &fresh {
-                                            view.set_tree(tree.clone());
-                                        }
-                                        scroll = 0;
-                                        current_pane = None;
-                                        tree_hold_until = hold_after_mutation();
-                                        // When running as an overlay *pane*, herdr
-                                        // may move focus within our home workspace
-                                        // on close, so we re-assert the user's
-                                        // original pane. As a popup we must NOT
-                                        // change focus here: a focus change while
-                                        // the popup is open dismisses it (flinging
-                                        // the user out of nav). Popups restore the
-                                        // prior focus automatically when closed.
-                                        let is_popup =
-                                            crate::herdr_client::own_pane_id().is_none();
-                                        if !is_popup {
-                                            if let (Some(hp), Ok(tree)) =
-                                                (home.focused_pane_id.as_deref(), &fresh)
-                                            {
-                                                let still_there = tree
-                                                    .workspaces
-                                                    .iter()
-                                                    .flat_map(|w| &w.tabs)
-                                                    .flat_map(|t| &t.panes)
-                                                    .any(|p| p.pane_id == hp);
-                                                if hp != pane_id && still_there {
-                                                    if let Some(ws) =
-                                                        home.workspace_id.as_deref()
-                                                    {
-                                                        let _ = api.focus_workspace(ws);
-                                                    }
-                                                    if let Some(tab) = home.tab_id.as_deref() {
-                                                        let _ = api.focus_tab(tab);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // Repaint: closing can leave a dirty
-                                        // backbuffer behind the popup.
-                                        guard.terminal().clear().ok();
-                                    }
-                                    Err(e) => {
-                                        status = Some(format!("close failed: {e}"));
-                                    }
-                                }
-                            }
-                            _ => {
-                                status = None;
-                            }
-                        }
-                        confirm_close = None;
-                    } else {
-                        match key.code {
-                            KeyCode::Char('q') => return Ok(LoopOutcome::Quit),
-                            KeyCode::Esc => {
-                                // Esc clears an active search filter first;
-                                // otherwise it quits.
-                                if view.is_searching() {
-                                    view.clear_query();
-                                } else {
-                                    return Ok(LoopOutcome::Quit);
-                                }
-                            }
-                            KeyCode::Char('/') => {
-                                // Enter incremental search mode.
-                                searching = true;
-                                view.clear_query();
-                                status = None;
-                            }
-                            KeyCode::Char('n') => {
-                                // Open a prompt to add a tab to the selected
-                                // workspace. Starts empty: Enter on an empty name
-                                // leaves the tab unnamed, so herdr (or a naming
-                                // plugin such as herdr-auto-title) names it.
-                                let ws = view.selected_row().map(|r| match r.kind {
-                                    RowKind::Workspace { workspace_id } => workspace_id,
-                                    RowKind::Tab { workspace_id, .. } => workspace_id,
-                                    RowKind::Pane { workspace_id, .. } => workspace_id,
-                                });
-                                match ws {
-                                    Some(wid) => {
-                                        status = None;
-                                        input_target =
-                                            Some(InputTarget::Tab { workspace_id: wid });
-                                        input_buf = Some(String::new());
-                                    }
-                                    None => {
-                                        status =
-                                            Some("select a workspace to add a tab".to_string());
-                                    }
-                                }
-                            }
-                            KeyCode::Char('N') => {
-                                // Add a workspace: first pick the directory via a
-                                // fuzzy picker (current cwd, zoxide, and scanned
-                                // roots), then open the name prompt for it.
-                                let current_cwd = view.selected_row().and_then(|r| {
-                                    r.representative_pane(view.tree())
-                                        .and_then(|p| p.cwd.clone())
-                                });
-                                let open_cwds: Vec<String> = view
-                                    .tree()
-                                    .workspaces
-                                    .iter()
-                                    .flat_map(|w| w.tabs.iter())
-                                    .flat_map(|t| t.panes.iter())
-                                    .filter_map(|p| p.cwd.clone())
-                                    .collect();
-                                let candidates = crate::dirs::collect_candidates(
-                                    current_cwd.as_deref(),
-                                    &open_cwds,
-                                );
-                                let chosen = pick_directory(&mut guard, candidates)?;
-                                // The picker painted its own screen; repaint the
-                                // tree regardless of the outcome.
-                                guard.terminal().clear().ok();
-                                if let Some(dir) = chosen {
-                                    // Default name = project dir name, made unique
-                                    // among existing workspace labels (`name-2`, ...).
-                                    // No branch: it would go stale on checkout (the
-                                    // tree shows the live branch anyway).
-                                    let name = project_name(&dir);
-                                    let default = if name.is_empty() {
-                                        view.tree().next_workspace_number().to_string()
-                                    } else {
-                                        let labels: Vec<&str> = view
-                                            .tree()
-                                            .workspaces
-                                            .iter()
-                                            .map(|w| w.label.as_str())
-                                            .collect();
-                                        unique_label(&name, &labels)
-                                    };
-                                    status = None;
-                                    input_target = Some(InputTarget::Workspace {
-                                        cwd: Some(dir),
-                                    });
-                                    input_buf = Some(default);
-                                } else {
-                                    status = None; // cancelled
-                                }
-                            }
-                            KeyCode::Enter => {
-                                if let Some(row) = view.selected_row() {
-                                    let plan = row.focus_plan(view.tree());
-                                    match api.apply_focus(&plan) {
-                                        Ok(()) => return Ok(LoopOutcome::Jumped),
-                                        Err(e) => {
-                                            status = Some(format!("focus failed: {e}"));
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => view.move_down(),
-                            KeyCode::Up | KeyCode::Char('k') => view.move_up(),
-                            KeyCode::Right | KeyCode::Char('l') => view.expand(),
-                            KeyCode::Left | KeyCode::Char('h') => view.collapse(),
-                            KeyCode::Char(' ') => view.toggle(),
-                            KeyCode::Char('x') => {
-                                // Arm a close confirmation for the selected row's
-                                // representative pane. Works on pane, tab, and
-                                // workspace rows (each resolves to a pane), so a
-                                // following Enter confirms the close instead of
-                                // falling through to the jump action.
-                                let target = view.selected_row().and_then(|r| {
-                                    r.representative_pane(view.tree()).map(|p| {
-                                        (p.pane_id.clone(), p.tab_id.clone(), r.name.clone())
-                                    })
-                                });
-                                match target {
-                                    Some((pid, tid, name)) => {
-                                        if own_tab.as_deref() == Some(tid.as_str()) {
-                                            // This pane lives in the navigator's own
-                                            // tab; closing it could disturb nav.
-                                            status = Some(
-                                                "can't close a pane in the navigator's own tab"
-                                                    .to_string(),
-                                            );
-                                        } else {
-                                            confirm_close = Some(pid);
-                                            status = Some(format!(
-                                                "kill pane \"{name}\"?  Enter = yes   Esc = no"
-                                            ));
-                                        }
-                                    }
-                                    None => {
-                                        status = Some("nothing to close".to_string());
-                                    }
-                                }
-                            }
-                            _ => {
-                                dirty = false;
-                            }
-                        }
+                    match app.handle_key(key, &mut guard)? {
+                        Flow::Redraw => dirty = true,
+                        Flow::Unhandled => {}
+                        Flow::Exit(outcome) => return Ok(outcome),
                     }
                 }
             }
@@ -1063,15 +711,15 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             latest = Some(tree);
         }
         if let Some(tree) = latest {
-            if std::time::Instant::now() >= tree_hold_until && view.refresh_tree(tree) {
+            if Instant::now() >= app.tree_hold_until && app.view.refresh_tree(tree) {
                 dirty = true;
             }
         }
 
         // On selection change, bump the generation, clear the stale preview,
         // and retarget the poller.
-        let new_pane = selected_pane_id(view);
-        if new_pane != current_pane {
+        let new_pane = selected_pane_id(app.view);
+        if new_pane != app.current_pane {
             let gen = poll_state.bump();
             preview_text = Text::default();
             dirty = true;
@@ -1079,14 +727,14 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                 generation: gen,
                 pane_id: new_pane.clone(),
             });
-            current_pane = new_pane;
+            app.current_pane = new_pane;
         }
 
         // Drain any pending updates; apply only the current generation. The
         // text is already ANSI-parsed by the poller, so this is just a move.
         while let Ok(update) = poller.updates.try_recv() {
             if poll_state.accepts(update.generation)
-                && Some(&update.pane_id) == current_pane.as_ref()
+                && Some(&update.pane_id) == app.current_pane.as_ref()
             {
                 preview_text = update.text;
                 dirty = true;
@@ -1095,9 +743,362 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     }
 }
 
-/// Deadline until which polled trees are ignored after a local create/close.
-fn hold_after_mutation() -> std::time::Instant {
-    std::time::Instant::now() + crate::poller::TREE_POLL_INTERVAL + Duration::from_millis(1000)
+/// Key-handling state of the event loop.
+struct App<'a> {
+    view: &'a mut TreeView,
+    api: &'a dyn HerdrApi,
+    mode: Mode,
+    status: Option<String>,
+    /// Persisted vertical scroll offset for the tree (sticky scrolling).
+    scroll: usize,
+    /// Pane the preview poller targets. Set to `None` to force a retarget.
+    current_pane: Option<String>,
+    /// After we mutate the tree ourselves (create/close), ignore polled trees
+    /// until this deadline: one built just before the change could resurrect
+    /// a closed pane or drop a just-created one.
+    tree_hold_until: Instant,
+    /// The tab the overlay itself lives in. Closing panes in this tab would
+    /// take the navigator down with it, so we refuse to close them.
+    own_tab: Option<String>,
+    /// The pane/tab/workspace the user was on when they opened the navigator.
+    /// After a close, herdr may re-assign focus within our home workspace, so
+    /// we re-assert this focus to keep the user's place.
+    home: crate::herdr_client::LaunchContext,
+}
+
+impl<'a> App<'a> {
+    fn new(view: &'a mut TreeView, api: &'a dyn HerdrApi) -> Self {
+        let current_pane = selected_pane_id(view);
+        Self {
+            view,
+            api,
+            mode: Mode::Normal,
+            status: None,
+            scroll: 0,
+            current_pane,
+            tree_hold_until: Instant::now(),
+            own_tab: crate::herdr_client::own_tab_id(),
+            home: crate::herdr_client::LaunchContext::from_env(),
+        }
+    }
+
+    fn render(
+        &mut self,
+        guard: &mut TerminalGuard,
+        preview: &Text<'static>,
+        tick: usize,
+        counts: (usize, usize, usize),
+    ) -> Result<()> {
+        let rows = self.view.rows();
+        // In text-entry modes, show the prompt (with a cursor) in the bar
+        // instead of the status/help.
+        let prompt = match &self.mode {
+            Mode::Search => Some(format!(
+                "/{}\u{2588}  ({} matches)",
+                self.view.query(),
+                rows.len()
+            )),
+            Mode::Prompt { target, text } => {
+                let what = match target {
+                    InputTarget::Tab { .. } => "new tab name (empty = auto)",
+                    InputTarget::Workspace { .. } => "new workspace name",
+                };
+                Some(format!("{what}: {text}\u{2588}"))
+            }
+            Mode::Normal | Mode::ConfirmClose { .. } => None,
+        };
+        let screen = Screen {
+            rows: &rows,
+            selected: self.view.selected_index(),
+            preview,
+            status: prompt.as_deref().or(self.status.as_deref()),
+            tick,
+            counts,
+        };
+        let scroll = &mut self.scroll;
+        guard
+            .terminal()
+            .draw(|frame| draw(frame, &screen, scroll))?;
+        Ok(())
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, guard: &mut TerminalGuard) -> Result<Flow> {
+        // Each handler sets `self.mode` again if the mode continues.
+        match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Search => Ok(self.on_search_key(key)),
+            Mode::Prompt { target, text } => {
+                self.on_prompt_key(key, target, text);
+                Ok(Flow::Redraw)
+            }
+            Mode::ConfirmClose { pane_id } => {
+                self.on_confirm_close_key(key, &pane_id, guard);
+                Ok(Flow::Redraw)
+            }
+            Mode::Normal => self.on_normal_key(key, guard),
+        }
+    }
+
+    /// Incremental search: printable keys edit the query and filter live,
+    /// Up/Down (and Ctrl+n/Ctrl+p, fzf-style) move within the results.
+    fn on_search_key(&mut self, key: KeyEvent) -> Flow {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.view.clear_query();
+                return Flow::Redraw;
+            }
+            // Leave edit mode but keep the filtered view, and jump to the
+            // selected row like a normal Enter.
+            KeyCode::Enter => return self.jump(),
+            KeyCode::Backspace => self.view.pop_query_char(),
+            KeyCode::Down => self.view.move_down(),
+            KeyCode::Up => self.view.move_up(),
+            // Before the plain Char arm so the letters aren't typed.
+            KeyCode::Char('n') if ctrl => self.view.move_down(),
+            KeyCode::Char('p') if ctrl => self.view.move_up(),
+            KeyCode::Char(c) => self.view.push_query_char(c),
+            _ => {}
+        }
+        self.mode = Mode::Search;
+        Flow::Redraw
+    }
+
+    fn on_prompt_key(&mut self, key: KeyEvent, target: InputTarget, mut text: String) {
+        match key.code {
+            KeyCode::Enter => self.submit_prompt(target, text.trim()),
+            KeyCode::Esc => self.status = None,
+            code => {
+                match code {
+                    KeyCode::Backspace => {
+                        text.pop();
+                    }
+                    KeyCode::Char(c) => text.push(c),
+                    _ => {}
+                }
+                self.mode = Mode::Prompt { target, text };
+            }
+        }
+    }
+
+    fn submit_prompt(&mut self, target: InputTarget, label: &str) {
+        match target {
+            InputTarget::Workspace { cwd } => {
+                let label = if label.is_empty() {
+                    self.view.tree().next_workspace_number().to_string()
+                } else {
+                    label.to_string()
+                };
+                match self.api.create_workspace(&label, cwd.as_deref()) {
+                    Ok(new_id) => {
+                        self.status = Some(format!("created workspace {label}"));
+                        self.reload_tree();
+                        self.view.select_for_launch(Some(&new_id), None, None);
+                        self.scroll = 0;
+                        self.after_mutation();
+                    }
+                    Err(e) => self.status = Some(format!("create failed: {e}")),
+                }
+            }
+            InputTarget::Tab { workspace_id } => match self.api.create_tab(&workspace_id) {
+                Ok(new_tab) => {
+                    // An empty name leaves the tab unnamed, so herdr (or a
+                    // naming plugin such as herdr-auto-title) names it.
+                    if !label.is_empty() {
+                        let _ = self.api.rename_tab(&new_tab, label);
+                    }
+                    self.status = Some("added tab".to_string());
+                    self.reload_tree();
+                    self.view
+                        .select_for_launch(Some(&workspace_id), Some(&new_tab), None);
+                    self.after_mutation();
+                }
+                Err(e) => self.status = Some(format!("add tab failed: {e}")),
+            },
+        }
+    }
+
+    /// tmux-style confirmation: `y` or Enter closes the armed pane, anything
+    /// else cancels.
+    fn on_confirm_close_key(&mut self, key: KeyEvent, pane_id: &str, guard: &mut TerminalGuard) {
+        if !matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter) {
+            self.status = None;
+            return;
+        }
+        if let Err(e) = self.api.close_pane(pane_id) {
+            self.status = Some(format!("close failed: {e}"));
+            return;
+        }
+        self.status = Some(format!("closed {pane_id}"));
+        // Drop the just-closed pane explicitly in case herdr's `pane list`
+        // hasn't caught up yet; the next poll converges on the real state.
+        let refreshed = match Tree::fetch(self.api, Some(pane_id)) {
+            Ok(tree) => {
+                self.view.set_tree(tree);
+                true
+            }
+            Err(_) => false,
+        };
+        self.scroll = 0;
+        self.after_mutation();
+        if refreshed {
+            self.restore_home_focus(pane_id);
+        }
+        // Repaint: closing can leave a dirty backbuffer behind the popup.
+        guard.terminal().clear().ok();
+    }
+
+    /// Re-focus the pane the user launched the navigator from, if it still
+    /// exists and wasn't the one just closed.
+    fn restore_home_focus(&self, closed_pane: &str) {
+        // Only when running as an overlay *pane*: herdr may move focus within
+        // our home workspace on close. As a popup we must NOT change focus: a
+        // focus change while the popup is open dismisses it (flinging the
+        // user out of nav). Popups restore the prior focus when closed.
+        let is_popup = crate::herdr_client::own_pane_id().is_none();
+        if is_popup {
+            return;
+        }
+        let Some(home_pane) = self.home.focused_pane_id.as_deref() else {
+            return;
+        };
+        let still_there = self.view.tree().panes().any(|p| p.pane_id == home_pane);
+        if home_pane == closed_pane || !still_there {
+            return;
+        }
+        if let Some(ws) = self.home.workspace_id.as_deref() {
+            let _ = self.api.focus_workspace(ws);
+        }
+        if let Some(tab) = self.home.tab_id.as_deref() {
+            let _ = self.api.focus_tab(tab);
+        }
+    }
+
+    fn on_normal_key(&mut self, key: KeyEvent, guard: &mut TerminalGuard) -> Result<Flow> {
+        match key.code {
+            KeyCode::Char('q') => return Ok(Flow::Exit(LoopOutcome::Quit)),
+            // Esc clears an active search filter first; otherwise it quits.
+            KeyCode::Esc => {
+                if self.view.is_searching() {
+                    self.view.clear_query();
+                } else {
+                    return Ok(Flow::Exit(LoopOutcome::Quit));
+                }
+            }
+            KeyCode::Char('/') => {
+                self.mode = Mode::Search;
+                self.view.clear_query();
+                self.status = None;
+            }
+            KeyCode::Char('n') => self.start_tab_prompt(),
+            KeyCode::Char('N') => self.start_workspace_prompt(guard)?,
+            KeyCode::Enter => return Ok(self.jump()),
+            KeyCode::Down | KeyCode::Char('j') => self.view.move_down(),
+            KeyCode::Up | KeyCode::Char('k') => self.view.move_up(),
+            KeyCode::Right | KeyCode::Char('l') => self.view.expand(),
+            KeyCode::Left | KeyCode::Char('h') => self.view.collapse(),
+            KeyCode::Char(' ') => self.view.toggle(),
+            KeyCode::Char('x') => self.arm_close(),
+            _ => return Ok(Flow::Unhandled),
+        }
+        Ok(Flow::Redraw)
+    }
+
+    /// Focus the selected row's target; the navigator exits on success.
+    fn jump(&mut self) -> Flow {
+        if let Some(row) = self.view.selected_row() {
+            match self.api.apply_focus(&row.focus_plan(self.view.tree())) {
+                Ok(()) => return Flow::Exit(LoopOutcome::Jumped),
+                Err(e) => self.status = Some(format!("focus failed: {e}")),
+            }
+        }
+        Flow::Redraw
+    }
+
+    /// Open an (initially empty) name prompt for a new tab in the selected
+    /// row's workspace.
+    fn start_tab_prompt(&mut self) {
+        match self.view.selected_row() {
+            Some(row) => {
+                self.status = None;
+                self.mode = Mode::Prompt {
+                    target: InputTarget::Tab {
+                        workspace_id: row.kind.workspace_id().to_string(),
+                    },
+                    text: String::new(),
+                };
+            }
+            None => self.status = Some("select a workspace to add a tab".to_string()),
+        }
+    }
+
+    /// Pick a directory with the fuzzy picker (current cwd, zoxide, and
+    /// scanned roots), then open the name prompt for a workspace there.
+    fn start_workspace_prompt(&mut self, guard: &mut TerminalGuard) -> Result<()> {
+        let tree = self.view.tree();
+        let current_cwd = self
+            .view
+            .selected_row()
+            .and_then(|r| r.representative_pane(tree).and_then(|p| p.cwd.clone()));
+        let open_cwds: Vec<String> = tree.panes().filter_map(|p| p.cwd.clone()).collect();
+        let candidates = crate::dirs::collect_candidates(current_cwd.as_deref(), &open_cwds);
+        let chosen = pick_directory(guard, candidates)?;
+        // The picker painted its own screen; repaint the tree regardless of
+        // the outcome.
+        guard.terminal().clear().ok();
+        self.status = None;
+        if let Some(dir) = chosen {
+            // Default name = project dir name, made unique among existing
+            // workspace labels (`name-2`, ...). No branch: it would go stale
+            // on checkout (the tree shows the live branch anyway).
+            let name = project_name(&dir);
+            let tree = self.view.tree();
+            let default = if name.is_empty() {
+                tree.next_workspace_number().to_string()
+            } else {
+                let labels: Vec<&str> = tree.workspaces.iter().map(|w| w.label.as_str()).collect();
+                unique_label(&name, &labels)
+            };
+            self.mode = Mode::Prompt {
+                target: InputTarget::Workspace { cwd: Some(dir) },
+                text: default,
+            };
+        }
+        Ok(())
+    }
+
+    /// Arm a close confirmation for the selected row's representative pane.
+    /// Works on pane, tab, and workspace rows (each resolves to a pane), so a
+    /// following Enter confirms the close instead of jumping.
+    fn arm_close(&mut self) {
+        let target = self.view.selected_row().and_then(|r| {
+            r.representative_pane(self.view.tree())
+                .map(|p| (p.pane_id.clone(), p.tab_id.clone(), r.name.clone()))
+        });
+        self.status = Some(match target {
+            None => "nothing to close".to_string(),
+            Some((_, tab_id, _)) if self.own_tab.as_deref() == Some(tab_id.as_str()) => {
+                "can't close a pane in the navigator's own tab".to_string()
+            }
+            Some((pane_id, _, name)) => {
+                self.mode = Mode::ConfirmClose { pane_id };
+                format!("kill pane \"{name}\"?  Enter = yes   Esc = no")
+            }
+        });
+    }
+
+    fn reload_tree(&mut self) {
+        if let Ok(tree) = Tree::fetch(self.api, None) {
+            self.view.set_tree(tree);
+        }
+    }
+
+    /// Retarget the preview and hold off polled trees after a local
+    /// create/close.
+    fn after_mutation(&mut self) {
+        self.current_pane = None;
+        self.tree_hold_until =
+            Instant::now() + crate::poller::TREE_POLL_INTERVAL + Duration::from_millis(1000);
+    }
 }
 
 /// Tree block title: ` spaces ` plus a summary of agent activity across all
@@ -1106,7 +1107,9 @@ fn hold_after_mutation() -> std::time::Instant {
 fn tree_title(counts: (usize, usize, usize), tick: usize) -> Line<'static> {
     let mut spans = vec![Span::styled(
         " spaces ",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )];
     let (working, blocked, done) = counts;
     for (n, status) in [(working, "working"), (blocked, "blocked"), (done, "done")] {
@@ -1124,30 +1127,38 @@ fn tree_title(counts: (usize, usize, usize), tick: usize) -> Line<'static> {
 }
 
 /// Title for the preview block based on the selected row.
-fn preview_title(rows: &[crate::view::Row], selected: usize) -> String {
-    match rows.get(selected).map(|r| &r.kind) {
-        Some(RowKind::Pane { pane_id, .. }) => format!(" preview: {pane_id} "),
-        Some(RowKind::Tab { tab_id, .. }) => format!(" preview: {tab_id} "),
-        Some(RowKind::Workspace { workspace_id }) => format!(" preview: {workspace_id} "),
+fn preview_title(rows: &[Row], selected: usize) -> String {
+    match rows.get(selected) {
+        Some(row) => format!(" preview: {} ", row.kind.id()),
         None => " preview ".to_string(),
     }
 }
 
-/// Draw the two-pane layout: tree on the left, preview on the right, plus a
-/// help/status bar at the bottom. `rows` is precomputed by the caller so the
-/// tree is only flattened once per frame, and `preview_text` is the already
+/// One frame's worth of data for `draw`. `rows` is precomputed by the caller
+/// so the tree is only flattened once per frame, and `preview` is the already
 /// ANSI-parsed preview so parsing is not repeated every frame.
-pub fn draw(
-    frame: &mut ratatui::Frame,
-    rows: &[crate::view::Row],
+struct Screen<'a> {
+    rows: &'a [Row],
     selected: usize,
-    preview_text: &Text<'static>,
-    preview_title: &str,
-    status: Option<&str>,
-    prev_offset: &mut usize,
+    preview: &'a Text<'static>,
+    /// Status or prompt text for the bottom bar; `None` shows the key help.
+    status: Option<&'a str>,
     tick: usize,
     counts: (usize, usize, usize),
-) {
+}
+
+/// Draw the two-pane layout: tree on the left, preview on the right, plus a
+/// help/status bar at the bottom. `prev_offset` carries the tree's scroll
+/// offset between frames.
+fn draw(frame: &mut ratatui::Frame, screen: &Screen, prev_offset: &mut usize) {
+    let Screen {
+        rows,
+        selected,
+        preview,
+        status,
+        tick,
+        counts,
+    } = *screen;
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -1191,12 +1202,12 @@ pub fn draw(
     );
     frame.render_widget(tree_widget, chunks[0]);
 
-    let preview_widget = Paragraph::new(preview_text.clone()).block(
+    let preview_widget = Paragraph::new(preview.clone()).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
             .title(Span::styled(
-                preview_title.to_string(),
+                preview_title(rows, selected),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -1204,13 +1215,10 @@ pub fn draw(
     );
     frame.render_widget(preview_widget, chunks[1]);
 
-    // Bottom help/status bar.
     let bar = match status {
         Some(s) => Line::from(Span::styled(
             format!(" {s} "),
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
             " ↑/↓ move   ←/→ fold   / search   ⏎ jump   n tab   N space   x close   q quit ",
@@ -1220,11 +1228,10 @@ pub fn draw(
     frame.render_widget(Paragraph::new(bar), outer[1]);
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::truncate_display;
     use super::project_name;
+    use super::truncate_display;
     use super::unique_label;
 
     #[test]
@@ -1251,11 +1258,20 @@ mod tests {
 
     #[test]
     fn project_name_is_basename() {
-        assert_eq!(project_name("/Users/asaryu/job/tmp1/sptv-video"), "sptv-video");
-        assert_eq!(project_name("/Users/asaryu/job/tmp1/sptv-video/"), "sptv-video");
+        assert_eq!(
+            project_name("/Users/asaryu/job/tmp1/sptv-video"),
+            "sptv-video"
+        );
+        assert_eq!(
+            project_name("/Users/asaryu/job/tmp1/sptv-video/"),
+            "sptv-video"
+        );
         assert_eq!(project_name("/"), "");
         assert_eq!(project_name("plain"), "plain");
-        assert_eq!(project_name("~/repos/herder-nav-with-preview"), "herder-nav-with-preview");
+        assert_eq!(
+            project_name("~/repos/herder-nav-with-preview"),
+            "herder-nav-with-preview"
+        );
     }
 
     #[test]

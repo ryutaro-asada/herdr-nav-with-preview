@@ -20,7 +20,7 @@ use ratatui::text::Text;
 use crate::herdr_client::{CliHerdr, HerdrApi};
 
 /// Poll interval for the live preview when the selection is unchanged.
-pub const POLL_INTERVAL: Duration = Duration::from_millis(1000);
+const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const PREVIEW_LINES: u32 = 100;
 
 /// A preview result tagged with the generation it was requested under. The
@@ -90,8 +90,7 @@ impl Poller {
     /// only reads `HERDR_BIN_PATH`), so nothing non-`Send` crosses the thread
     /// boundary.
     pub fn spawn(initial: PollRequest) -> Self {
-        let (tx, rx): (Sender<PreviewUpdate>, Receiver<PreviewUpdate>) =
-            std::sync::mpsc::channel();
+        let (tx, rx): (Sender<PreviewUpdate>, Receiver<PreviewUpdate>) = std::sync::mpsc::channel();
         let shared = Arc::new((
             Mutex::new(Shared {
                 request: initial,
@@ -109,7 +108,8 @@ impl Poller {
             let (lock, cvar) = &*thread_shared;
 
             loop {
-                // Snapshot the current request under the lock.
+                // Clone the request so the lock isn't held during the slow
+                // herdr call.
                 let req = {
                     let guard = lock.lock().unwrap();
                     if guard.stop {

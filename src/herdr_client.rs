@@ -16,6 +16,7 @@
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 /// Resolve the herdr binary to call. Prefer the injected `HERDR_BIN_PATH`,
@@ -28,7 +29,7 @@ pub fn herdr_bin() -> String {
 /// git is unavailable, or HEAD is detached. Uses `git -C <cwd> rev-parse
 /// --abbrev-ref HEAD`; a detached HEAD reports `HEAD`, which we treat as none.
 pub fn git_branch(cwd: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = Command::new("git")
         .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()?;
@@ -46,10 +47,7 @@ pub fn git_branch(cwd: &str) -> Option<String> {
 /// Directories known to `zoxide`, most-frecent first, or an empty list when
 /// zoxide is not installed/usable. Shells out to `zoxide query -l`.
 pub fn zoxide_dirs() -> Vec<String> {
-    let output = match std::process::Command::new("zoxide")
-        .args(["query", "-l"])
-        .output()
-    {
+    let output = match Command::new("zoxide").args(["query", "-l"]).output() {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
@@ -65,7 +63,9 @@ pub fn zoxide_dirs() -> Vec<String> {
 /// navigator doesn't list itself. Popups are not panes and have no
 /// `HERDR_PANE_ID`, in which case this is `None` (and nothing needs excluding).
 pub fn own_pane_id() -> Option<String> {
-    std::env::var("HERDR_PANE_ID").ok().filter(|s| !s.is_empty())
+    std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// The tab the navigator was launched from. Prefer `HERDR_TAB_ID` (set for
@@ -96,15 +96,14 @@ pub struct LaunchContext {
 impl LaunchContext {
     /// Read the launch context from the environment herdr injects.
     pub fn from_env() -> Self {
-        if let Ok(json) = std::env::var("HERDR_PLUGIN_CONTEXT_JSON") {
-            if let Ok(ctx) = Self::from_json(&json) {
-                // Backfill workspace/tab from the dedicated vars if missing.
-                return ctx.with_env_fallback();
-            }
-        }
-        LaunchContext::default().with_env_fallback()
+        std::env::var("HERDR_PLUGIN_CONTEXT_JSON")
+            .ok()
+            .and_then(|json| Self::from_json(&json).ok())
+            .unwrap_or_default()
+            .with_env_fallback()
     }
 
+    /// Backfill workspace/tab from the dedicated env vars when missing.
     fn with_env_fallback(mut self) -> Self {
         if self.workspace_id.is_none() {
             self.workspace_id = std::env::var("HERDR_WORKSPACE_ID").ok();
@@ -201,15 +200,22 @@ impl Pane {
     }
 }
 
+/// herdr CLI JSON replies wrap their payload in `{ "result": ... }`.
+#[derive(Debug, Deserialize)]
+struct Envelope<T> {
+    result: T,
+}
+
+fn parse_result<T: DeserializeOwned>(json: &str, command: &str) -> Result<T> {
+    let env: Envelope<T> =
+        serde_json::from_str(json).with_context(|| format!("failed to parse `{command}` JSON"))?;
+    Ok(env.result)
+}
+
 #[derive(Debug, Deserialize)]
 struct WorkspaceListResult {
     #[serde(default)]
     workspaces: Vec<Workspace>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkspaceListEnvelope {
-    result: WorkspaceListResult,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,39 +225,21 @@ struct TabListResult {
 }
 
 #[derive(Debug, Deserialize)]
-struct TabListEnvelope {
-    result: TabListResult,
-}
-
-#[derive(Debug, Deserialize)]
 struct PaneListResult {
     #[serde(default)]
     panes: Vec<Pane>,
 }
 
-#[derive(Debug, Deserialize)]
-struct PaneListEnvelope {
-    result: PaneListResult,
-}
-
-// --- JSON parsing (pure functions, unit-tested against real fixtures) ---
-
 pub fn parse_workspaces(json: &str) -> Result<Vec<Workspace>> {
-    let env: WorkspaceListEnvelope =
-        serde_json::from_str(json).context("failed to parse `workspace list` JSON")?;
-    Ok(env.result.workspaces)
+    parse_result::<WorkspaceListResult>(json, "workspace list").map(|r| r.workspaces)
 }
 
 pub fn parse_tabs(json: &str) -> Result<Vec<Tab>> {
-    let env: TabListEnvelope =
-        serde_json::from_str(json).context("failed to parse `tab list` JSON")?;
-    Ok(env.result.tabs)
+    parse_result::<TabListResult>(json, "tab list").map(|r| r.tabs)
 }
 
 pub fn parse_panes(json: &str) -> Result<Vec<Pane>> {
-    let env: PaneListEnvelope =
-        serde_json::from_str(json).context("failed to parse `pane list` JSON")?;
-    Ok(env.result.panes)
+    parse_result::<PaneListResult>(json, "pane list").map(|r| r.panes)
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,16 +252,10 @@ struct CreateWorkspaceResult {
     workspace: CreatedWorkspace,
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateWorkspaceEnvelope {
-    result: CreateWorkspaceResult,
-}
-
 /// Parse the workspace id from `workspace create` output.
 pub fn parse_created_workspace_id(json: &str) -> Result<String> {
-    let env: CreateWorkspaceEnvelope =
-        serde_json::from_str(json).context("failed to parse `workspace create` JSON")?;
-    Ok(env.result.workspace.workspace_id)
+    parse_result::<CreateWorkspaceResult>(json, "workspace create")
+        .map(|r| r.workspace.workspace_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,19 +268,10 @@ struct CreateTabResult {
     tab: CreatedTab,
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateTabEnvelope {
-    result: CreateTabResult,
-}
-
 /// Parse the new tab id from `tab create` output (`.result.tab.tab_id`).
 pub fn parse_created_tab_id(json: &str) -> Result<String> {
-    let env: CreateTabEnvelope =
-        serde_json::from_str(json).context("failed to parse `tab create` JSON")?;
-    Ok(env.result.tab.tab_id)
+    parse_result::<CreateTabResult>(json, "tab create").map(|r| r.tab.tab_id)
 }
-
-// --- CLI invocation ---
 
 /// A plan describing how to jump focus to a target, as an ordered list of
 /// herdr focus steps. On herdr 0.7.x there is no "focus pane by id", so we
@@ -331,7 +304,7 @@ impl FocusPlan {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn pane(
         workspace_id: impl Into<String>,
         tab_id: impl Into<String>,
@@ -350,9 +323,8 @@ pub trait HerdrApi {
     fn workspaces(&self) -> Result<Vec<Workspace>>;
     fn tabs(&self) -> Result<Vec<Tab>>;
     fn panes(&self) -> Result<Vec<Pane>>;
-    #[allow(dead_code)]
-    fn read_pane(&self, pane_id: &str, lines: u32) -> Result<String>;
-    /// Like `read_pane` but preserves ANSI SGR escapes for colored rendering.
+    /// Read up to `lines` lines of a pane's visible screen, keeping ANSI SGR
+    /// escapes for colored rendering.
     fn read_pane_ansi(&self, pane_id: &str, lines: u32) -> Result<String>;
     fn focus_workspace(&self, workspace_id: &str) -> Result<()>;
     fn focus_tab(&self, tab_id: &str) -> Result<()>;
@@ -430,13 +402,6 @@ impl HerdrApi for CliHerdr {
 
     fn panes(&self) -> Result<Vec<Pane>> {
         parse_panes(&self.run(&["pane", "list"])?)
-    }
-
-    fn read_pane(&self, pane_id: &str, lines: u32) -> Result<String> {
-        let lines = lines.to_string();
-        self.run(&[
-            "pane", "read", pane_id, "--source", "visible", "--lines", &lines,
-        ])
     }
 
     fn read_pane_ansi(&self, pane_id: &str, lines: u32) -> Result<String> {
@@ -546,13 +511,18 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(parse_tabs(r#"{"result":{"tabs":[]}}"#).unwrap().is_empty());
-        assert!(parse_panes(r#"{"result":{"panes":[]}}"#).unwrap().is_empty());
+        assert!(parse_panes(r#"{"result":{"panes":[]}}"#)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn missing_optional_fields_ok() {
         // Only required ids present; optional fields default.
-        let panes = parse_panes(r#"{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}]}}"#).unwrap();
+        let panes = parse_panes(
+            r#"{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}]}}"#,
+        )
+        .unwrap();
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0].display_title(), "shell");
         assert!(!panes[0].focused);
@@ -582,9 +552,6 @@ mod tests {
         }
         fn panes(&self) -> Result<Vec<Pane>> {
             Ok(vec![])
-        }
-        fn read_pane(&self, _pane_id: &str, _lines: u32) -> Result<String> {
-            Ok(String::new())
         }
         fn read_pane_ansi(&self, _pane_id: &str, _lines: u32) -> Result<String> {
             Ok(String::new())
