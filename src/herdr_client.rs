@@ -16,6 +16,7 @@
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 /// Resolve the herdr binary to call. Prefer the injected `HERDR_BIN_PATH`,
@@ -28,7 +29,7 @@ pub fn herdr_bin() -> String {
 /// git is unavailable, or HEAD is detached. Uses `git -C <cwd> rev-parse
 /// --abbrev-ref HEAD`; a detached HEAD reports `HEAD`, which we treat as none.
 pub fn git_branch(cwd: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = Command::new("git")
         .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()?;
@@ -46,10 +47,7 @@ pub fn git_branch(cwd: &str) -> Option<String> {
 /// Directories known to `zoxide`, most-frecent first, or an empty list when
 /// zoxide is not installed/usable. Shells out to `zoxide query -l`.
 pub fn zoxide_dirs() -> Vec<String> {
-    let output = match std::process::Command::new("zoxide")
-        .args(["query", "-l"])
-        .output()
-    {
+    let output = match Command::new("zoxide").args(["query", "-l"]).output() {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
@@ -98,15 +96,14 @@ pub struct LaunchContext {
 impl LaunchContext {
     /// Read the launch context from the environment herdr injects.
     pub fn from_env() -> Self {
-        if let Ok(json) = std::env::var("HERDR_PLUGIN_CONTEXT_JSON") {
-            if let Ok(ctx) = Self::from_json(&json) {
-                // Backfill workspace/tab from the dedicated vars if missing.
-                return ctx.with_env_fallback();
-            }
-        }
-        LaunchContext::default().with_env_fallback()
+        std::env::var("HERDR_PLUGIN_CONTEXT_JSON")
+            .ok()
+            .and_then(|json| Self::from_json(&json).ok())
+            .unwrap_or_default()
+            .with_env_fallback()
     }
 
+    /// Backfill workspace/tab from the dedicated env vars when missing.
     fn with_env_fallback(mut self) -> Self {
         if self.workspace_id.is_none() {
             self.workspace_id = std::env::var("HERDR_WORKSPACE_ID").ok();
@@ -203,15 +200,22 @@ impl Pane {
     }
 }
 
+/// herdr CLI JSON replies wrap their payload in `{ "result": ... }`.
+#[derive(Debug, Deserialize)]
+struct Envelope<T> {
+    result: T,
+}
+
+fn parse_result<T: DeserializeOwned>(json: &str, command: &str) -> Result<T> {
+    let env: Envelope<T> =
+        serde_json::from_str(json).with_context(|| format!("failed to parse `{command}` JSON"))?;
+    Ok(env.result)
+}
+
 #[derive(Debug, Deserialize)]
 struct WorkspaceListResult {
     #[serde(default)]
     workspaces: Vec<Workspace>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkspaceListEnvelope {
-    result: WorkspaceListResult,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,39 +225,21 @@ struct TabListResult {
 }
 
 #[derive(Debug, Deserialize)]
-struct TabListEnvelope {
-    result: TabListResult,
-}
-
-#[derive(Debug, Deserialize)]
 struct PaneListResult {
     #[serde(default)]
     panes: Vec<Pane>,
 }
 
-#[derive(Debug, Deserialize)]
-struct PaneListEnvelope {
-    result: PaneListResult,
-}
-
-// --- JSON parsing (pure functions, unit-tested against real fixtures) ---
-
 pub fn parse_workspaces(json: &str) -> Result<Vec<Workspace>> {
-    let env: WorkspaceListEnvelope =
-        serde_json::from_str(json).context("failed to parse `workspace list` JSON")?;
-    Ok(env.result.workspaces)
+    parse_result::<WorkspaceListResult>(json, "workspace list").map(|r| r.workspaces)
 }
 
 pub fn parse_tabs(json: &str) -> Result<Vec<Tab>> {
-    let env: TabListEnvelope =
-        serde_json::from_str(json).context("failed to parse `tab list` JSON")?;
-    Ok(env.result.tabs)
+    parse_result::<TabListResult>(json, "tab list").map(|r| r.tabs)
 }
 
 pub fn parse_panes(json: &str) -> Result<Vec<Pane>> {
-    let env: PaneListEnvelope =
-        serde_json::from_str(json).context("failed to parse `pane list` JSON")?;
-    Ok(env.result.panes)
+    parse_result::<PaneListResult>(json, "pane list").map(|r| r.panes)
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,16 +252,10 @@ struct CreateWorkspaceResult {
     workspace: CreatedWorkspace,
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateWorkspaceEnvelope {
-    result: CreateWorkspaceResult,
-}
-
 /// Parse the workspace id from `workspace create` output.
 pub fn parse_created_workspace_id(json: &str) -> Result<String> {
-    let env: CreateWorkspaceEnvelope =
-        serde_json::from_str(json).context("failed to parse `workspace create` JSON")?;
-    Ok(env.result.workspace.workspace_id)
+    parse_result::<CreateWorkspaceResult>(json, "workspace create")
+        .map(|r| r.workspace.workspace_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,16 +268,9 @@ struct CreateTabResult {
     tab: CreatedTab,
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateTabEnvelope {
-    result: CreateTabResult,
-}
-
 /// Parse the new tab id from `tab create` output (`.result.tab.tab_id`).
 pub fn parse_created_tab_id(json: &str) -> Result<String> {
-    let env: CreateTabEnvelope =
-        serde_json::from_str(json).context("failed to parse `tab create` JSON")?;
-    Ok(env.result.tab.tab_id)
+    parse_result::<CreateTabResult>(json, "tab create").map(|r| r.tab.tab_id)
 }
 
 // --- CLI invocation ---
