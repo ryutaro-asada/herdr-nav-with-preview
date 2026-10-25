@@ -164,11 +164,6 @@ impl Tree {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.workspaces.is_empty()
-    }
-
     /// Resolve each workspace's git branch from its cwd (one git call per
     /// workspace). Call once after building; `rows()` then renders the cached
     /// branch without any further git invocations.
@@ -332,7 +327,7 @@ mod tests {
     #[test]
     fn empty_inputs() {
         let tree = Tree::build(vec![], vec![], vec![], None);
-        assert!(tree.is_empty());
+        assert!(tree.workspaces.is_empty());
         assert_eq!(tree.to_indented_text(), "");
         // Default number for the first workspace is 1.
         assert_eq!(tree.next_workspace_number(), 1);

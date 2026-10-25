@@ -20,7 +20,7 @@ use ratatui::text::Text;
 use crate::herdr_client::{CliHerdr, HerdrApi};
 
 /// Poll interval for the live preview when the selection is unchanged.
-pub const POLL_INTERVAL: Duration = Duration::from_millis(1000);
+const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const PREVIEW_LINES: u32 = 100;
 
 /// A preview result tagged with the generation it was requested under. The

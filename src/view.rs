@@ -387,7 +387,6 @@ impl TreeView {
     }
 
     /// Replace the underlying tree (e.g. after a refresh), clamping selection.
-    #[allow(dead_code)]
     pub fn set_tree(&mut self, tree: Tree) {
         self.tree = tree;
         let max = self.rows().len().saturating_sub(1);
