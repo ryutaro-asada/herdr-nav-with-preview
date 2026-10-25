@@ -23,7 +23,7 @@ use ratatui::{
 use crate::herdr_client::HerdrApi;
 use crate::poller::{PollRequest, PollState, Poller};
 use crate::tree::Tree;
-use crate::view::{RowKind, TreeView};
+use crate::view::{Row, RowKind, TreeView};
 
 /// How long to wait for a key event before checking for preview updates.
 const EVENT_POLL: Duration = Duration::from_millis(30);
@@ -123,6 +123,9 @@ fn status_color(status: Option<&str>) -> Color {
     }
 }
 
+/// Background of the selected row, like herdr's native cursor.
+const SELECTED_BG: Color = Color::Rgb(68, 80, 120);
+
 /// Braille spinner frames for the `working` state.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -141,8 +144,6 @@ fn status_glyph(status: Option<&str>, tick: usize) -> &'static str {
     }
 }
 
-/// Per-kind color: workspace blue, tab purple, pane peach. Chosen to stay
-/// distinct from the agent-status dot colors (yellow/red/green/cyan).
 /// Is this an "active" status worth flagging loudly (working/blocked/done)?
 fn is_notable_status(status: Option<&str>) -> bool {
     matches!(status, Some("working" | "blocked" | "done"))
@@ -194,6 +195,8 @@ fn status_counts(tree: &Tree) -> (usize, usize, usize) {
     c
 }
 
+/// Per-kind color: workspace blue, tab purple, pane peach. Chosen to stay
+/// distinct from the agent-status dot colors (yellow/red/green/cyan).
 fn kind_color(kind: &RowKind) -> Color {
     match kind {
         RowKind::Workspace { .. } => Color::Rgb(130, 170, 255),
@@ -205,12 +208,8 @@ fn kind_color(kind: &RowKind) -> Color {
 /// Build a styled line for one tree row, herdr-navigator style:
 /// `▎ <tree-glyph> <status-dot> <name> [agent]`. When selected, the whole row
 /// is filled with a solid highlight background across the full width.
-fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -> Line<'static> {
-    use crate::view::RowKind;
-
-    // Solid fill behind the selected row, like herdr's native cursor.
-    let sel_bg = Color::Rgb(68, 80, 120);
-    let base = |s: Style| if selected { s.bg(sel_bg) } else { s };
+fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'static> {
+    let base = |s: Style| if selected { s.bg(SELECTED_BG) } else { s };
 
     let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -218,7 +217,7 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
     if selected {
         spans.push(Span::styled(
             "▏",
-            Style::default().fg(Color::Cyan).bg(sel_bg),
+            Style::default().fg(Color::Cyan).bg(SELECTED_BG),
         ));
     } else {
         spans.push(Span::raw(" "));
@@ -451,11 +450,15 @@ fn pick_directory(guard: &mut TerminalGuard, candidates: Vec<String>) -> Result<
     loop {
         if dirty {
             let rows = picker.rows();
-            let selected = picker.selected;
-            let query = picker.query.clone();
-            let total = picker.paths.len();
             guard.terminal().draw(|frame| {
-                draw_dir_picker(frame, &rows, selected, &query, total, &mut scroll)
+                draw_dir_picker(
+                    frame,
+                    &rows,
+                    picker.selected,
+                    &picker.query,
+                    picker.paths.len(),
+                    &mut scroll,
+                )
             })?;
             dirty = false;
         }
@@ -540,7 +543,6 @@ fn draw_dir_picker(
     let offset = crate::view::scroll_offset(selected, rows.len(), inner_h, *scroll);
     *scroll = offset;
 
-    let sel_bg = Color::Rgb(68, 80, 120);
     let mut lines: Vec<Line> = Vec::new();
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -551,7 +553,7 @@ fn draw_dir_picker(
     for (i, (display, positions)) in rows.iter().enumerate().skip(offset).take(inner_h.max(1)) {
         let is_sel = i == selected;
         let base = if is_sel {
-            Style::default().bg(sel_bg).fg(Color::White)
+            Style::default().bg(SELECTED_BG).fg(Color::White)
         } else {
             Style::default()
         };
@@ -560,7 +562,7 @@ fn draw_dir_picker(
         spans.push(Span::styled(
             if is_sel { "▏ " } else { "  " },
             if is_sel {
-                Style::default().fg(Color::Cyan).bg(sel_bg)
+                Style::default().fg(Color::Cyan).bg(SELECTED_BG)
             } else {
                 base
             },
@@ -1129,7 +1131,7 @@ fn tree_title(counts: (usize, usize, usize), tick: usize) -> Line<'static> {
 }
 
 /// Title for the preview block based on the selected row.
-fn preview_title(rows: &[crate::view::Row], selected: usize) -> String {
+fn preview_title(rows: &[Row], selected: usize) -> String {
     match rows.get(selected) {
         Some(row) => format!(" preview: {} ", row.kind.id()),
         None => " preview ".to_string(),
@@ -1140,7 +1142,7 @@ fn preview_title(rows: &[crate::view::Row], selected: usize) -> String {
 /// so the tree is only flattened once per frame, and `preview` is the already
 /// ANSI-parsed preview so parsing is not repeated every frame.
 struct Screen<'a> {
-    rows: &'a [crate::view::Row],
+    rows: &'a [Row],
     selected: usize,
     preview: &'a Text<'static>,
     /// Status or prompt text for the bottom bar; `None` shows the key help.
