@@ -90,8 +90,7 @@ impl Poller {
     /// only reads `HERDR_BIN_PATH`), so nothing non-`Send` crosses the thread
     /// boundary.
     pub fn spawn(initial: PollRequest) -> Self {
-        let (tx, rx): (Sender<PreviewUpdate>, Receiver<PreviewUpdate>) =
-            std::sync::mpsc::channel();
+        let (tx, rx): (Sender<PreviewUpdate>, Receiver<PreviewUpdate>) = std::sync::mpsc::channel();
         let shared = Arc::new((
             Mutex::new(Shared {
                 request: initial,

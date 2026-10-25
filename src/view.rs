@@ -242,7 +242,8 @@ fn has_number_prefix(label: &str) -> bool {
     rest.len() < label.len() && (rest.starts_with(" ·") || rest.starts_with(". "))
 }
 
-pub struct TreeView {    tree: Tree,
+pub struct TreeView {
+    tree: Tree,
     /// Keys of nodes that are collapsed. Default (absent) == expanded.
     collapsed: HashSet<String>,
     selected: usize,
@@ -317,44 +318,47 @@ impl TreeView {
 
         // 1: exact pane row.
         if let Some(pid) = pane_id {
-            if let Some(i) = rows.iter().position(|r| {
-                matches!(&r.kind, RowKind::Pane { pane_id, .. } if pane_id == pid)
-            }) {
+            if let Some(i) = rows
+                .iter()
+                .position(|r| matches!(&r.kind, RowKind::Pane { pane_id, .. } if pane_id == pid))
+            {
                 self.selected = i;
                 return;
             }
         }
         // 2: first pane under the given tab.
         if let Some(tid) = tab_id {
-            if let Some(i) = rows.iter().position(|r| {
-                matches!(&r.kind, RowKind::Pane { tab_id, .. } if tab_id == tid)
-            }) {
+            if let Some(i) = rows
+                .iter()
+                .position(|r| matches!(&r.kind, RowKind::Pane { tab_id, .. } if tab_id == tid))
+            {
                 self.selected = i;
                 return;
             }
         }
         // 3: first pane under the given workspace.
         if let Some(wid) = workspace_id {
-            if let Some(i) = rows.iter().position(|r| {
-                matches!(&r.kind, RowKind::Pane { workspace_id, .. } if workspace_id == wid)
-            }) {
+            if let Some(i) = rows.iter().position(
+                |r| matches!(&r.kind, RowKind::Pane { workspace_id, .. } if workspace_id == wid),
+            ) {
                 self.selected = i;
                 return;
             }
         }
         // 4: no pane resolved — fall back to the tab, then the workspace row.
         if let Some(tid) = tab_id {
-            if let Some(i) = rows.iter().position(|r| {
-                matches!(&r.kind, RowKind::Tab { tab_id, .. } if tab_id == tid)
-            }) {
+            if let Some(i) = rows
+                .iter()
+                .position(|r| matches!(&r.kind, RowKind::Tab { tab_id, .. } if tab_id == tid))
+            {
                 self.selected = i;
                 return;
             }
         }
         if let Some(wid) = workspace_id {
-            if let Some(i) = rows.iter().position(|r| {
-                matches!(&r.kind, RowKind::Workspace { workspace_id } if workspace_id == wid)
-            }) {
+            if let Some(i) = rows.iter().position(
+                |r| matches!(&r.kind, RowKind::Workspace { workspace_id } if workspace_id == wid),
+            ) {
                 self.selected = i;
             }
         }
@@ -685,7 +689,13 @@ mod tests {
         let rows = view.rows();
         // workspace, tab1(collapsed), tab2, pane2 = 4 rows.
         assert_eq!(rows.len(), 4);
-        assert_eq!(rows[1].kind, RowKind::Tab { workspace_id: "w1".into(), tab_id: "w1:t1".into() });
+        assert_eq!(
+            rows[1].kind,
+            RowKind::Tab {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into()
+            }
+        );
         assert!(!rows[1].expanded);
     }
 
@@ -906,14 +916,14 @@ mod tests {
         assert_eq!(scroll_offset(2, 20, 5, 0), 0);
         assert_eq!(scroll_offset(4, 20, 5, 0), 0);
         assert_eq!(scroll_offset(7, 20, 5, 5), 5); // 7 in [5,10): stay
-        // Selection below the window: reveal at bottom.
+                                                   // Selection below the window: reveal at bottom.
         assert_eq!(scroll_offset(5, 20, 5, 0), 1); // 5 >= 0+5 -> 1
         assert_eq!(scroll_offset(12, 20, 5, 5), 8); // 12 >= 10 -> 12+1-5
-        // Selection above the window: reveal at top (the bug we fixed — moving
-        // up should NOT drag the bottom; it stops as soon as selection shows).
+                                                    // Selection above the window: reveal at top (the bug we fixed — moving
+                                                    // up should NOT drag the bottom; it stops as soon as selection shows).
         assert_eq!(scroll_offset(3, 20, 5, 8), 3); // jumped up above window
         assert_eq!(scroll_offset(9, 20, 5, 10), 9); // one above window top
-        // Never scroll past the end.
+                                                    // Never scroll past the end.
         assert_eq!(scroll_offset(19, 20, 5, 0), 15);
         assert_eq!(scroll_offset(10, 20, 5, 99), 10); // prev clamped
     }
@@ -927,7 +937,10 @@ mod tests {
         // reaches its top edge, instead of shifting every step.
         for sel in (15..=19).rev() {
             offset = scroll_offset(sel, 20, 5, offset);
-            assert_eq!(offset, 15, "window should not move while sel {sel} is visible");
+            assert_eq!(
+                offset, 15,
+                "window should not move while sel {sel} is visible"
+            );
         }
         // Now move above the top (14): window scrolls up by exactly one.
         offset = scroll_offset(14, 20, 5, offset);
@@ -1038,7 +1051,10 @@ mod tests {
     fn row_matches_query_direct() {
         let view = TreeView::new(sample_tree());
         let rows = view.rows();
-        let pane_claude = rows.iter().find(|r| matches!(&r.kind, RowKind::Pane { pane_id, .. } if pane_id == "w1:p2")).unwrap();
+        let pane_claude = rows
+            .iter()
+            .find(|r| matches!(&r.kind, RowKind::Pane { pane_id, .. } if pane_id == "w1:p2"))
+            .unwrap();
         assert!(row_matches_query(pane_claude, "claude"));
         assert!(row_matches_query(pane_claude, "w1:p2")); // id match
         assert!(!row_matches_query(pane_claude, "nope"));
@@ -1052,7 +1068,11 @@ mod tests {
         let view = TreeView::new(tree);
         let rows = view.rows();
         // Workspace row name: "1  proj (feature/foo)".
-        assert!(rows[0].name.contains("proj (feature/foo)"), "got {:?}", rows[0].name);
+        assert!(
+            rows[0].name.contains("proj (feature/foo)"),
+            "got {:?}",
+            rows[0].name
+        );
     }
 
     #[test]
@@ -1071,7 +1091,15 @@ mod tests {
         tree.workspaces[0].branch = Some("main".to_string());
         let view = TreeView::new(tree);
         let rows = view.rows();
-        assert!(rows[0].name.ends_with("proj (main)"), "got {:?}", rows[0].name);
-        assert!(!rows[0].name.contains("(main) (main)"), "got {:?}", rows[0].name);
+        assert!(
+            rows[0].name.ends_with("proj (main)"),
+            "got {:?}",
+            rows[0].name
+        );
+        assert!(
+            !rows[0].name.contains("(main) (main)"),
+            "got {:?}",
+            rows[0].name
+        );
     }
 }

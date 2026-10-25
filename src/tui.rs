@@ -84,7 +84,8 @@ enum InputTarget {
 /// Resolve the pane id to preview for the currently selected row.
 fn selected_pane_id(view: &TreeView) -> Option<String> {
     let row = view.selected_row()?;
-    row.representative_pane(view.tree()).map(|p| p.pane_id.clone())
+    row.representative_pane(view.tree())
+        .map(|p| p.pane_id.clone())
 }
 
 /// Rebuild the workspace > tab > pane tree from the live herdr state.
@@ -187,7 +188,12 @@ fn status_chip(status: Option<&str>) -> Option<(String, Style)> {
 /// `(working, blocked, done)`.
 fn status_counts(tree: &Tree) -> (usize, usize, usize) {
     let mut c = (0, 0, 0);
-    for p in tree.workspaces.iter().flat_map(|w| &w.tabs).flat_map(|t| &t.panes) {
+    for p in tree
+        .workspaces
+        .iter()
+        .flat_map(|w| &w.tabs)
+        .flat_map(|t| &t.panes)
+    {
         match p.agent_status.as_deref() {
             Some("working") => c.0 += 1,
             Some("blocked") => c.1 += 1,
@@ -252,7 +258,10 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
     // Expand/collapse caret for expandable nodes.
     if row.expandable {
         let caret = if row.expanded { "▾ " } else { "▸ " };
-        spans.push(Span::styled(caret, base(Style::default().fg(Color::DarkGray))));
+        spans.push(Span::styled(
+            caret,
+            base(Style::default().fg(Color::DarkGray)),
+        ));
     }
 
     // Kind icon so workspaces, tabs, and panes are distinguishable at a glance;
@@ -263,7 +272,10 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
         RowKind::Tab { .. } => "▪ ",
         RowKind::Pane { .. } => "› ",
     };
-    spans.push(Span::styled(kind_icon, base(Style::default().fg(kind_color))));
+    spans.push(Span::styled(
+        kind_icon,
+        base(Style::default().fg(kind_color)),
+    ));
 
     // Agent status glyph. Pane rows always show it; workspace/tab rows show
     // herdr's aggregated status only when notable (working/blocked/done), so
@@ -275,7 +287,10 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
         if is_notable_status(status) {
             st = st.add_modifier(Modifier::BOLD);
         }
-        spans.push(Span::styled(format!("{} ", status_glyph(status, tick)), base(st)));
+        spans.push(Span::styled(
+            format!("{} ", status_glyph(status, tick)),
+            base(st),
+        ));
     }
 
     // The name, in the kind's color. Workspaces bold; the focused workspace is
@@ -308,10 +323,7 @@ fn row_line(row: &crate::view::Row, selected: bool, width: usize, tick: usize) -
         .map(|(t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()) + 1)
         .unwrap_or(0);
     let avail = width.saturating_sub(used);
-    let name = truncate_display(
-        &row.name,
-        avail.saturating_sub(badge_w + chip_w).max(1),
-    );
+    let name = truncate_display(&row.name, avail.saturating_sub(badge_w + chip_w).max(1));
     let name_w = unicode_width::UnicodeWidthStr::width(name.as_str());
     spans.push(Span::styled(name, base(name_style)));
     if let Some(badge) = agent_badge {
@@ -350,11 +362,7 @@ fn unique_label(base: &str, existing: &[&str]) -> String {
 /// herdr's native workspace auto-naming. Empty if the path has no component.
 fn project_name(cwd: &str) -> String {
     let trimmed = cwd.trim_end_matches('/');
-    trimmed
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .to_string()
+    trimmed.rsplit('/').next().unwrap_or("").to_string()
 }
 
 /// Selection/filter state for the directory picker. Keeps absolute paths (used
@@ -496,7 +504,10 @@ fn fit_tail(s: &str, width: usize) -> (bool, Vec<(char, usize)>) {
     let chars: Vec<char> = s.chars().collect();
     let total: usize = chars.iter().map(|c| c.width().unwrap_or(0)).sum();
     if total <= width {
-        return (false, chars.into_iter().enumerate().map(|(i, c)| (c, i)).collect());
+        return (
+            false,
+            chars.into_iter().enumerate().map(|(i, c)| (c, i)).collect(),
+        );
     }
     let budget = width.saturating_sub(1);
     let mut used = 0;
@@ -558,7 +569,11 @@ fn draw_dir_picker(
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(
             if is_sel { "▏ " } else { "  " },
-            if is_sel { Style::default().fg(Color::Cyan).bg(sel_bg) } else { base },
+            if is_sel {
+                Style::default().fg(Color::Cyan).bg(sel_bg)
+            } else {
+                base
+            },
         ));
         let (cut, visible) = fit_tail(display, inner_w.saturating_sub(2).max(1));
         if cut {
@@ -566,7 +581,11 @@ fn draw_dir_picker(
         }
         let mut used = 2 + usize::from(cut);
         for (c, idx) in visible {
-            let style = if positions.binary_search(&idx).is_ok() { hl } else { base };
+            let style = if positions.binary_search(&idx).is_ok() {
+                hl
+            } else {
+                base
+            };
             spans.push(Span::styled(c.to_string(), style));
             used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         }
@@ -582,14 +601,24 @@ fn draw_dir_picker(
             .border_style(Style::default().fg(Color::DarkGray))
             .title(Span::styled(
                 " new workspace — pick a directory ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )),
     );
     frame.render_widget(list, outer[0]);
 
     let bar = Line::from(vec![
-        Span::styled(" > ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{query}\u{2588}"), Style::default().fg(Color::White)),
+        Span::styled(
+            " > ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{query}\u{2588}"),
+            Style::default().fg(Color::White),
+        ),
         Span::styled(
             format!(
                 "   {}/{}   ↑↓/^n^p move  ^u clear  ⏎ choose  Esc cancel",
@@ -667,9 +696,8 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
     });
     // Periodic tree refresh so agent statuses (and added/closed panes) stay
     // live while the navigator is open.
-    let tree_poller = crate::poller::TreePoller::spawn(|| {
-        build_tree(&crate::herdr_client::CliHerdr::new()).ok()
-    });
+    let tree_poller =
+        crate::poller::TreePoller::spawn(|| build_tree(&crate::herdr_client::CliHerdr::new()).ok());
     // After we mutate the tree ourselves (create/close), ignore polled trees
     // for a moment: one built just before the change could resurrect a closed
     // pane or drop a just-created one.
@@ -701,7 +729,11 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
             // In text-entry mode, show the prompt (with a cursor) in the bar;
             // otherwise show the current status/help.
             let bar_text = if searching {
-                Some(format!("/{}\u{2588}  ({} matches)", view.query(), rows.len()))
+                Some(format!(
+                    "/{}\u{2588}  ({} matches)",
+                    view.query(),
+                    rows.len()
+                ))
             } else {
                 input_buf.as_ref().map(|b| {
                     let what = match input_target {
@@ -785,8 +817,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         };
                                         match api.create_workspace(&label, cwd.as_deref()) {
                                             Ok(new_id) => {
-                                                status =
-                                                    Some(format!("created workspace {label}"));
+                                                status = Some(format!("created workspace {label}"));
                                                 if let Ok(tree) = build_tree(api) {
                                                     view.set_tree(tree);
                                                 }
@@ -869,8 +900,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         // the popup is open dismisses it (flinging
                                         // the user out of nav). Popups restore the
                                         // prior focus automatically when closed.
-                                        let is_popup =
-                                            crate::herdr_client::own_pane_id().is_none();
+                                        let is_popup = crate::herdr_client::own_pane_id().is_none();
                                         if !is_popup {
                                             if let (Some(hp), Ok(tree)) =
                                                 (home.focused_pane_id.as_deref(), &fresh)
@@ -882,9 +912,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                                     .flat_map(|t| &t.panes)
                                                     .any(|p| p.pane_id == hp);
                                                 if hp != pane_id && still_there {
-                                                    if let Some(ws) =
-                                                        home.workspace_id.as_deref()
-                                                    {
+                                                    if let Some(ws) = home.workspace_id.as_deref() {
                                                         let _ = api.focus_workspace(ws);
                                                     }
                                                     if let Some(tab) = home.tab_id.as_deref() {
@@ -938,8 +966,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 match ws {
                                     Some(wid) => {
                                         status = None;
-                                        input_target =
-                                            Some(InputTarget::Tab { workspace_id: wid });
+                                        input_target = Some(InputTarget::Tab { workspace_id: wid });
                                         input_buf = Some(String::new());
                                     }
                                     None => {
@@ -990,9 +1017,7 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                         unique_label(&name, &labels)
                                     };
                                     status = None;
-                                    input_target = Some(InputTarget::Workspace {
-                                        cwd: Some(dir),
-                                    });
+                                    input_target = Some(InputTarget::Workspace { cwd: Some(dir) });
                                     input_buf = Some(default);
                                 } else {
                                     status = None; // cancelled
@@ -1106,7 +1131,9 @@ fn hold_after_mutation() -> std::time::Instant {
 fn tree_title(counts: (usize, usize, usize), tick: usize) -> Line<'static> {
     let mut spans = vec![Span::styled(
         " spaces ",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )];
     let (working, blocked, done) = counts;
     for (n, status) in [(working, "working"), (blocked, "blocked"), (done, "done")] {
@@ -1208,9 +1235,7 @@ pub fn draw(
     let bar = match status {
         Some(s) => Line::from(Span::styled(
             format!(" {s} "),
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
             " ↑/↓ move   ←/→ fold   / search   ⏎ jump   n tab   N space   x close   q quit ",
@@ -1220,11 +1245,10 @@ pub fn draw(
     frame.render_widget(Paragraph::new(bar), outer[1]);
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::truncate_display;
     use super::project_name;
+    use super::truncate_display;
     use super::unique_label;
 
     #[test]
@@ -1251,11 +1275,20 @@ mod tests {
 
     #[test]
     fn project_name_is_basename() {
-        assert_eq!(project_name("/Users/asaryu/job/tmp1/sptv-video"), "sptv-video");
-        assert_eq!(project_name("/Users/asaryu/job/tmp1/sptv-video/"), "sptv-video");
+        assert_eq!(
+            project_name("/Users/asaryu/job/tmp1/sptv-video"),
+            "sptv-video"
+        );
+        assert_eq!(
+            project_name("/Users/asaryu/job/tmp1/sptv-video/"),
+            "sptv-video"
+        );
         assert_eq!(project_name("/"), "");
         assert_eq!(project_name("plain"), "plain");
-        assert_eq!(project_name("~/repos/herder-nav-with-preview"), "herder-nav-with-preview");
+        assert_eq!(
+            project_name("~/repos/herder-nav-with-preview"),
+            "herder-nav-with-preview"
+        );
     }
 
     #[test]

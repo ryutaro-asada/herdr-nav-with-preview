@@ -174,22 +174,14 @@ impl Tree {
     /// branch without any further git invocations.
     pub fn resolve_branches(&mut self) {
         for w in &mut self.workspaces {
-            w.branch = w
-                .cwd
-                .as_deref()
-                .and_then(crate::herdr_client::git_branch);
+            w.branch = w.cwd.as_deref().and_then(crate::herdr_client::git_branch);
         }
     }
 
     /// The default label for a new workspace: one past the highest existing
     /// workspace number (falling back to count + 1).
     pub fn next_workspace_number(&self) -> u32 {
-        let max = self
-            .workspaces
-            .iter()
-            .map(|w| w.number)
-            .max()
-            .unwrap_or(0);
+        let max = self.workspaces.iter().map(|w| w.number).max().unwrap_or(0);
         max.max(self.workspaces.len() as u32) + 1
     }
 
@@ -386,7 +378,10 @@ mod tests {
     fn group_key_strips_branch_suffix_and_counter() {
         assert_eq!(workspace_group_key("sptv-video", "w1"), "sptv-video");
         assert_eq!(workspace_group_key("sptv-video-2", "w1"), "sptv-video");
-        assert_eq!(workspace_group_key("sptv-video (develop)", "w1"), "sptv-video");
+        assert_eq!(
+            workspace_group_key("sptv-video (develop)", "w1"),
+            "sptv-video"
+        );
         assert_eq!(
             workspace_group_key("sptv-video (chore/x) (develop)", "w1"),
             "sptv-video"
@@ -414,7 +409,13 @@ mod tests {
         let labels: Vec<&str> = tree.workspaces.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["api", "memo", "memo-2", "sptv-video", "sptv-video (develop)"]
+            vec![
+                "api",
+                "memo",
+                "memo-2",
+                "sptv-video",
+                "sptv-video (develop)"
+            ]
         );
     }
 }

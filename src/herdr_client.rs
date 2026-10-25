@@ -65,7 +65,9 @@ pub fn zoxide_dirs() -> Vec<String> {
 /// navigator doesn't list itself. Popups are not panes and have no
 /// `HERDR_PANE_ID`, in which case this is `None` (and nothing needs excluding).
 pub fn own_pane_id() -> Option<String> {
-    std::env::var("HERDR_PANE_ID").ok().filter(|s| !s.is_empty())
+    std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// The tab the navigator was launched from. Prefer `HERDR_TAB_ID` (set for
@@ -546,13 +548,18 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(parse_tabs(r#"{"result":{"tabs":[]}}"#).unwrap().is_empty());
-        assert!(parse_panes(r#"{"result":{"panes":[]}}"#).unwrap().is_empty());
+        assert!(parse_panes(r#"{"result":{"panes":[]}}"#)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn missing_optional_fields_ok() {
         // Only required ids present; optional fields default.
-        let panes = parse_panes(r#"{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}]}}"#).unwrap();
+        let panes = parse_panes(
+            r#"{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}]}}"#,
+        )
+        .unwrap();
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0].display_title(), "shell");
         assert!(!panes[0].focused);
