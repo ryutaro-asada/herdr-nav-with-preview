@@ -915,11 +915,9 @@ pub fn run(view: &mut TreeView, api: &dyn HerdrApi) -> Result<LoopOutcome> {
                                 // workspace. Starts empty: Enter on an empty name
                                 // leaves the tab unnamed, so herdr (or a naming
                                 // plugin such as herdr-auto-title) names it.
-                                let ws = view.selected_row().map(|r| match r.kind {
-                                    RowKind::Workspace { workspace_id } => workspace_id,
-                                    RowKind::Tab { workspace_id, .. } => workspace_id,
-                                    RowKind::Pane { workspace_id, .. } => workspace_id,
-                                });
+                                let ws = view
+                                    .selected_row()
+                                    .map(|r| r.kind.workspace_id().to_string());
                                 match ws {
                                     Some(wid) => {
                                         status = None;
@@ -1103,10 +1101,8 @@ fn tree_title(counts: (usize, usize, usize), tick: usize) -> Line<'static> {
 
 /// Title for the preview block based on the selected row.
 fn preview_title(rows: &[crate::view::Row], selected: usize) -> String {
-    match rows.get(selected).map(|r| &r.kind) {
-        Some(RowKind::Pane { pane_id, .. }) => format!(" preview: {pane_id} "),
-        Some(RowKind::Tab { tab_id, .. }) => format!(" preview: {tab_id} "),
-        Some(RowKind::Workspace { workspace_id }) => format!(" preview: {workspace_id} "),
+    match rows.get(selected) {
+        Some(row) => format!(" preview: {} ", row.kind.id()),
         None => " preview ".to_string(),
     }
 }

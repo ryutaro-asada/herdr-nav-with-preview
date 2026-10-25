@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::tree::Tree;
+use crate::tree::{PaneNode, TabNode, Tree, WorkspaceNode};
 
 /// What kind of node a visible row refers to, plus the ids needed to act on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,42 @@ pub enum RowKind {
         tab_id: String,
         pane_id: String,
     },
+}
+
+impl RowKind {
+    /// The workspace this node belongs to.
+    pub fn workspace_id(&self) -> &str {
+        match self {
+            RowKind::Workspace { workspace_id }
+            | RowKind::Tab { workspace_id, .. }
+            | RowKind::Pane { workspace_id, .. } => workspace_id,
+        }
+    }
+
+    /// The node's own id: the workspace, tab, or pane id.
+    pub fn id(&self) -> &str {
+        match self {
+            RowKind::Workspace { workspace_id } => workspace_id,
+            RowKind::Tab { tab_id, .. } => tab_id,
+            RowKind::Pane { pane_id, .. } => pane_id,
+        }
+    }
+
+    /// Every id on the path to this node, workspace first.
+    fn ids(&self) -> Vec<&str> {
+        match self {
+            RowKind::Workspace { workspace_id } => vec![workspace_id],
+            RowKind::Tab {
+                workspace_id,
+                tab_id,
+            } => vec![workspace_id, tab_id],
+            RowKind::Pane {
+                workspace_id,
+                tab_id,
+                pane_id,
+            } => vec![workspace_id, tab_id, pane_id],
+        }
+    }
 }
 
 /// A single rendered row in the left tree pane.
@@ -53,7 +89,7 @@ pub struct Row {
 impl Row {
     /// The pane id this row resolves to for preview/focus, if any. Workspaces
     /// and tabs resolve to their first pane (the representative pane).
-    pub fn representative_pane<'a>(&self, tree: &'a Tree) -> Option<&'a crate::tree::PaneNode> {
+    pub fn representative_pane<'a>(&self, tree: &'a Tree) -> Option<&'a PaneNode> {
         match &self.kind {
             RowKind::Pane { pane_id, .. } => tree.panes().find(|p| &p.pane_id == pane_id),
             RowKind::Tab { tab_id, .. } => tree
@@ -79,47 +115,28 @@ impl Row {
     pub fn focus_plan(&self, tree: &Tree) -> crate::herdr_client::FocusPlan {
         use crate::herdr_client::FocusPlan;
 
-        // Pane-id for the agent-focus step, but only if that pane has an agent.
-        let agent_pane = |p: &crate::tree::PaneNode| -> Option<String> {
-            if p.agent.as_deref().map(|a| !a.is_empty()).unwrap_or(false) {
-                Some(p.pane_id.clone())
-            } else {
-                None
-            }
-        };
-
-        match &self.kind {
+        let rep = self.representative_pane(tree);
+        let agent_pane = rep
+            .filter(|p| p.agent.as_deref().is_some_and(|a| !a.is_empty()))
+            .map(|p| p.pane_id.clone());
+        let mut plan = match &self.kind {
             RowKind::Pane {
                 workspace_id,
                 tab_id,
-                pane_id,
-            } => {
-                let mut plan = FocusPlan::tab(workspace_id, tab_id);
-                // Only add the agent-focus step when this pane hosts an agent.
-                let has_agent = tree
-                    .panes()
-                    .find(|p| &p.pane_id == pane_id)
-                    .and_then(agent_pane);
-                plan.pane_id = has_agent;
-                plan
+                ..
             }
-            RowKind::Tab {
+            | RowKind::Tab {
                 workspace_id,
                 tab_id,
-            } => {
-                let mut plan = FocusPlan::tab(workspace_id, tab_id);
-                plan.pane_id = self.representative_pane(tree).and_then(agent_pane);
-                plan
-            }
+            } => FocusPlan::tab(workspace_id, tab_id),
             RowKind::Workspace { workspace_id } => {
                 let mut plan = FocusPlan::workspace(workspace_id);
-                if let Some(p) = self.representative_pane(tree) {
-                    plan.tab_id = Some(p.tab_id.clone());
-                    plan.pane_id = agent_pane(p);
-                }
+                plan.tab_id = rep.map(|p| p.tab_id.clone());
                 plan
             }
-        }
+        };
+        plan.pane_id = agent_pane;
+        plan
     }
 }
 
@@ -161,36 +178,9 @@ pub fn row_matches_query(row: &Row, query: &str) -> bool {
         return true;
     }
     let mut hay = row.name.to_lowercase();
-    if let Some(a) = &row.agent {
+    for part in row.agent.as_deref().into_iter().chain(row.kind.ids()) {
         hay.push(' ');
-        hay.push_str(&a.to_lowercase());
-    }
-    match &row.kind {
-        RowKind::Workspace { workspace_id } => {
-            hay.push(' ');
-            hay.push_str(&workspace_id.to_lowercase());
-        }
-        RowKind::Tab {
-            workspace_id,
-            tab_id,
-        } => {
-            hay.push(' ');
-            hay.push_str(&workspace_id.to_lowercase());
-            hay.push(' ');
-            hay.push_str(&tab_id.to_lowercase());
-        }
-        RowKind::Pane {
-            workspace_id,
-            tab_id,
-            pane_id,
-        } => {
-            hay.push(' ');
-            hay.push_str(&workspace_id.to_lowercase());
-            hay.push(' ');
-            hay.push_str(&tab_id.to_lowercase());
-            hay.push(' ');
-            hay.push_str(&pane_id.to_lowercase());
-        }
+        hay.push_str(&part.to_lowercase());
     }
     hay.contains(&q)
 }
@@ -221,7 +211,8 @@ pub fn filter_rows(all: &[Row], query: &str) -> Vec<Row> {
     }
     all.iter()
         .zip(keep)
-        .filter_map(|(r, k)| if k { Some(r.clone()) } else { None })
+        .filter(|&(_, k)| k)
+        .map(|(r, _)| r.clone())
         .collect()
 }
 
@@ -232,6 +223,46 @@ pub fn filter_rows(all: &[Row], query: &str) -> Vec<Row> {
 fn has_number_prefix(label: &str) -> bool {
     let rest = label.trim_start_matches(|c: char| c.is_ascii_digit());
     rest.len() < label.len() && (rest.starts_with(" ·") || rest.starts_with(". "))
+}
+
+/// Workspace row name: `number  label` (the id when the label is blank),
+/// plus the git branch in parentheses when the workspace cwd is a repo.
+fn workspace_row_name(w: &WorkspaceNode) -> String {
+    let label = if w.label.trim().is_empty() {
+        w.workspace_id.clone()
+    } else {
+        w.label.clone()
+    };
+    // Labels may already end with the branch (e.g. "name (branch)").
+    let label = match &w.branch {
+        Some(b) if !b.is_empty() && !label.ends_with(&format!("({b})")) => {
+            format!("{label} ({b})")
+        }
+        _ => label,
+    };
+    if w.number > 0 {
+        format!("{}  {}", w.number, label)
+    } else {
+        label
+    }
+}
+
+/// Tab row name. Tab labels are often just the tab number, so show `#N` when
+/// the label is empty or equals the number (instead of "2  2"), otherwise
+/// `N  label`.
+fn tab_row_name(t: &TabNode) -> String {
+    let label = t.label.trim();
+    if label.is_empty() || label == t.number.to_string() {
+        if t.number > 0 {
+            format!("#{}", t.number)
+        } else {
+            t.tab_id.clone()
+        }
+    } else if t.number > 0 && !has_number_prefix(label) {
+        format!("{}  {}", t.number, label)
+    } else {
+        label.to_string()
+    }
 }
 
 pub struct TreeView {
@@ -307,52 +338,36 @@ impl TreeView {
         pane_id: Option<&str>,
     ) {
         let rows = self.rows();
-
-        // 1: exact pane row.
-        if let Some(pid) = pane_id {
-            if let Some(i) = rows
-                .iter()
-                .position(|r| matches!(&r.kind, RowKind::Pane { pane_id, .. } if pane_id == pid))
-            {
-                self.selected = i;
-                return;
+        let is = |want: Option<&str>, id: &str| want == Some(id);
+        // Lower rank = better match, in the order described above.
+        let rank = |kind: &RowKind| match kind {
+            RowKind::Pane {
+                workspace_id: w,
+                tab_id: t,
+                pane_id: p,
+            } => {
+                if is(pane_id, p) {
+                    Some(0)
+                } else if is(tab_id, t) {
+                    Some(1)
+                } else if is(workspace_id, w) {
+                    Some(2)
+                } else {
+                    None
+                }
             }
-        }
-        // 2: first pane under the given tab.
-        if let Some(tid) = tab_id {
-            if let Some(i) = rows
-                .iter()
-                .position(|r| matches!(&r.kind, RowKind::Pane { tab_id, .. } if tab_id == tid))
-            {
-                self.selected = i;
-                return;
-            }
-        }
-        // 3: first pane under the given workspace.
-        if let Some(wid) = workspace_id {
-            if let Some(i) = rows.iter().position(
-                |r| matches!(&r.kind, RowKind::Pane { workspace_id, .. } if workspace_id == wid),
-            ) {
-                self.selected = i;
-                return;
-            }
-        }
-        // 4: no pane resolved — fall back to the tab, then the workspace row.
-        if let Some(tid) = tab_id {
-            if let Some(i) = rows
-                .iter()
-                .position(|r| matches!(&r.kind, RowKind::Tab { tab_id, .. } if tab_id == tid))
-            {
-                self.selected = i;
-                return;
-            }
-        }
-        if let Some(wid) = workspace_id {
-            if let Some(i) = rows.iter().position(
-                |r| matches!(&r.kind, RowKind::Workspace { workspace_id } if workspace_id == wid),
-            ) {
-                self.selected = i;
-            }
+            RowKind::Tab { tab_id: t, .. } => is(tab_id, t).then_some(3),
+            RowKind::Workspace { workspace_id: w } => is(workspace_id, w).then_some(4),
+        };
+        // `min_by_key` keeps the first of equal ranks, i.e. the topmost row.
+        let found = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| rank(&r.kind).map(|k| (i, k)))
+            .min_by_key(|&(_, k)| k)
+            .map(|(i, _)| i);
+        if let Some(i) = found {
+            self.selected = i;
         }
     }
 
@@ -381,10 +396,7 @@ impl TreeView {
     /// Replace the underlying tree (e.g. after a refresh), clamping selection.
     pub fn set_tree(&mut self, tree: Tree) {
         self.tree = tree;
-        let max = self.rows().len().saturating_sub(1);
-        if self.selected > max {
-            self.selected = max;
-        }
+        self.clamp_selection();
     }
 
     fn is_collapsed(&self, key: &str) -> bool {
@@ -411,30 +423,10 @@ impl TreeView {
         for (wi, w) in self.tree.workspaces.iter().enumerate() {
             let wkey = ws_key(&w.workspace_id);
             let w_collapsed = honor_collapse && self.is_collapsed(&wkey);
-            // Workspace name: "number  label" with a clean fallback, plus the
-            // git branch in parentheses when the workspace cwd is a repo.
-            let label = if w.label.trim().is_empty() {
-                w.workspace_id.clone()
-            } else {
-                w.label.clone()
-            };
-            // Skip the suffix when the label already ends with it (workspaces
-            // created via `N` default to "name (branch)").
-            let label = match &w.branch {
-                Some(b) if !b.is_empty() && !label.ends_with(&format!("({b})")) => {
-                    format!("{label} ({b})")
-                }
-                _ => label,
-            };
-            let name = if w.number > 0 {
-                format!("{}  {}", w.number, label)
-            } else {
-                label
-            };
             let w_is_last = wi + 1 == ws_count;
             rows.push(Row {
                 depth: 0,
-                name,
+                name: workspace_row_name(w),
                 kind: RowKind::Workspace {
                     workspace_id: w.workspace_id.clone(),
                 },
@@ -453,25 +445,10 @@ impl TreeView {
             for (ti, t) in w.tabs.iter().enumerate() {
                 let tkey = tab_key(&t.tab_id);
                 let t_collapsed = honor_collapse && self.is_collapsed(&tkey);
-                let tlabel = t.label.trim();
-                // Tab labels are often just the tab number; avoid showing
-                // "2  2". Show "#N" when the label is empty or equals the
-                // number, otherwise "N  label".
-                let tname = if tlabel.is_empty() || tlabel == t.number.to_string() {
-                    if t.number > 0 {
-                        format!("#{}", t.number)
-                    } else {
-                        t.tab_id.clone()
-                    }
-                } else if t.number > 0 && !has_number_prefix(tlabel) {
-                    format!("{}  {}", t.number, tlabel)
-                } else {
-                    tlabel.to_string()
-                };
                 let t_is_last = ti + 1 == tab_count;
                 rows.push(Row {
                     depth: 1,
-                    name: tname,
+                    name: tab_row_name(t),
                     kind: RowKind::Tab {
                         workspace_id: t.workspace_id.clone(),
                         tab_id: t.tab_id.clone(),
@@ -516,11 +493,7 @@ impl TreeView {
     }
 
     pub fn move_down(&mut self) {
-        let len = self.rows().len();
-        if len == 0 {
-            return;
-        }
-        if self.selected + 1 < len {
+        if self.selected + 1 < self.rows().len() {
             self.selected += 1;
         }
     }
@@ -556,9 +529,7 @@ impl TreeView {
     /// Toggle expand/collapse of the selected node.
     pub fn toggle(&mut self) {
         if let Some(key) = self.selected_key() {
-            if self.collapsed.contains(&key) {
-                self.collapsed.remove(&key);
-            } else {
+            if !self.collapsed.remove(&key) {
                 self.collapsed.insert(key);
             }
         }
