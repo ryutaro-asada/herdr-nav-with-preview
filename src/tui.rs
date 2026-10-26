@@ -468,10 +468,12 @@ fn pick_directory(guard: &mut TerminalGuard, candidates: Vec<String>) -> Result<
                 match key.code {
                     KeyCode::Esc => return Ok(None),
                     KeyCode::Enter => return Ok(picker.selection()),
-                    KeyCode::Down => picker.move_down(),
-                    KeyCode::Up => picker.move_up(),
-                    KeyCode::Char('n') | KeyCode::Char('j') if ctrl => picker.move_down(),
-                    KeyCode::Char('p') | KeyCode::Char('k') if ctrl => picker.move_up(),
+                    // The list is drawn bottom-up, so moving up on screen
+                    // goes to the next (lower-ranked) match.
+                    KeyCode::Up => picker.move_down(),
+                    KeyCode::Down => picker.move_up(),
+                    KeyCode::Char('p') | KeyCode::Char('k') if ctrl => picker.move_down(),
+                    KeyCode::Char('n') | KeyCode::Char('j') if ctrl => picker.move_up(),
                     KeyCode::Char('u') if ctrl => picker.clear(),
                     KeyCode::Char('c') if ctrl => return Ok(None),
                     KeyCode::Backspace => picker.pop(),
@@ -519,8 +521,9 @@ fn fit_tail(s: &str, width: usize) -> (bool, Vec<(char, usize)>) {
     )
 }
 
-/// Render the directory picker: the ranked matching directories (matched
-/// characters highlighted, selected row filled) and a filter prompt below.
+/// Render the directory picker: the ranked matching directories, best match at
+/// the bottom (matched characters highlighted, selected row filled), and a
+/// filter prompt below.
 fn draw_dir_picker(
     frame: &mut ratatui::Frame,
     rows: &[(&str, &[usize])],
@@ -582,6 +585,11 @@ fn draw_dir_picker(
         }
         lines.push(Line::from(spans));
     }
+    // fzf-style bottom-up layout: the best match sits right above the prompt
+    // and the list grows upward, leaving any spare rows empty at the top.
+    lines.reverse();
+    let pad = inner_h.saturating_sub(lines.len());
+    lines.splice(0..0, std::iter::repeat_with(Line::default).take(pad));
 
     let list = Paragraph::new(lines).block(
         Block::default()
