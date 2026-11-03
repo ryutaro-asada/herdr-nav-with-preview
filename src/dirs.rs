@@ -7,8 +7,9 @@
 //!   3. `zoxide query -l` if zoxide is installed,
 //!   4. sibling directories of the open cwds,
 //!   5. every directory under the scan roots (default: `$HOME`), walked up to
-//!      `depth` levels with the `ignore` crate (hidden, `.gitignore`d and
-//!      build/dependency dirs skipped) — like fzf's `Alt-C` / `fd -t d`.
+//!      `depth` levels with the `ignore` crate (hidden dirs included;
+//!      `.git`, caches, `.gitignore`d and build/dependency dirs skipped) —
+//!      like fzf's `Alt-C` / `fd -t d -H`.
 //!
 //! Config lives at `<HERDR_PLUGIN_CONFIG_DIR>/config.toml`:
 //! ```toml
@@ -37,8 +38,22 @@ const DEFAULT_DEPTH: usize = 5;
 /// Upper bound on scanned directories, to keep the picker responsive.
 const MAX_SCANNED: usize = 50_000;
 
-/// Directory names never descended into or listed.
+/// Directory names never descended into or listed. Hidden dirs are listed in
+/// general (`~/.config`, dotfiles repos), so VCS metadata and the big
+/// package/tool caches are named here: `~/.npm`, `~/.bun` and `~/.gradle` hold
+/// ~10k dirs each and would crowd real projects out of `MAX_SCANNED`.
 const SKIP_NAMES: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    ".next",
+    ".terraform",
+    ".cache",
+    ".npm",
+    ".bun",
+    ".gradle",
+    ".Trash",
     "node_modules",
     "target",
     "vendor",
@@ -85,7 +100,7 @@ pub fn abbreviate_home(path: &str, home: Option<&str>) -> String {
 }
 
 /// Find the value of `key = ...` (first occurrence) in simple TOML text.
-fn toml_value<'a>(config_toml: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn toml_value<'a>(config_toml: &'a str, key: &str) -> Option<&'a str> {
     for line in config_toml.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix(key) {
@@ -251,7 +266,7 @@ fn skip_dir(path: &Path, home: Option<&Path>) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return true;
     };
-    if name.starts_with('.') || SKIP_NAMES.contains(&name) {
+    if SKIP_NAMES.contains(&name) {
         return true;
     }
     match (home, path.parent()) {
@@ -261,8 +276,8 @@ fn skip_dir(path: &Path, home: Option<&Path>) -> bool {
 }
 
 /// Walk directories under `roots` up to `depth` levels (1 = direct children)
-/// with the `ignore` crate (ripgrep's parallel walker). Hidden dirs,
-/// `.gitignore`d dirs and build/dependency dirs are skipped. Output is sorted
+/// with the `ignore` crate (ripgrep's parallel walker). Hidden dirs are
+/// included; `.gitignore`d dirs and the `SKIP_NAMES` dirs are skipped. Output is sorted
 /// shallow-first, then by path, and capped at `MAX_SCANNED`.
 pub fn scan_roots(roots: &[String], depth: usize) -> Vec<String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -282,7 +297,7 @@ pub fn scan_roots(roots: &[String], depth: usize) -> Vec<String> {
     }
     builder
         .max_depth(Some(depth))
-        .hidden(true)
+        .hidden(false)
         .parents(false)
         .follow_links(false)
         .filter_entry(move |e| {
@@ -554,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_respects_depth_and_skips_hidden_and_deps() {
+    fn scan_respects_depth_and_skips_vcs_and_deps() {
         let base = std::env::temp_dir().join(format!("hnp-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         for d in [
@@ -562,7 +577,7 @@ mod tests {
             "root/proj-a/inner",
             "root/group/proj-b",
             "root/group/proj-b/deep",
-            "root/.hidden/x",
+            "root/.hidden",
             "root/node_modules/y",
         ] {
             std::fs::create_dir_all(base.join(d)).unwrap();
@@ -573,9 +588,12 @@ mod tests {
             .iter()
             .map(|p| p.strip_prefix(&format!("{root}/")).unwrap().to_string())
             .collect();
-        // Shallow first, then by path. Hidden/node_modules skipped (also
-        // `.git`); depth 3 (`group/proj-b/deep`) not reached.
-        assert_eq!(rel, s(&["group", "proj-a", "group/proj-b", "proj-a/inner"]));
+        // Shallow first, then by path. Hidden dirs are listed; `.git` and
+        // node_modules are skipped; depth 3 (`group/proj-b/deep`) not reached.
+        assert_eq!(
+            rel,
+            s(&[".hidden", "group", "proj-a", "group/proj-b", "proj-a/inner"])
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

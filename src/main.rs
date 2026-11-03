@@ -93,8 +93,14 @@ fn run_tui() -> Result<()> {
     let api = CliHerdr::new();
     let tree = load_or_hint(|| Tree::fetch(&api, None))?;
     let mut view = TreeView::new(tree);
+    view.set_fold(view::Fold::from_config());
 
     let ctx = herdr_client::LaunchContext::from_env();
+    // Show the tabs and panes of the workspace the user launched from, even
+    // when `fold` hides them elsewhere.
+    if let Some(ws) = ctx.workspace_id.clone().or_else(|| view.focused_workspace_id()) {
+        view.reveal_workspace(&ws);
+    }
     view.select_for_launch(
         ctx.workspace_id.as_deref(),
         ctx.tab_id.as_deref(),

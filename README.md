@@ -44,6 +44,20 @@ https://github.com/user-attachments/assets/8452b37e-ca67-4693-be4f-cee3e05c584d
 | `Enter` | Focus the selected pane and close the navigator |
 | `q` / `Esc` | Quit without jumping |
 
+## Initial folding
+
+The tree opens with only workspaces shown, except the workspace you opened the
+navigator from, which shows its tabs and panes. Expand another with `→`. Change this
+with `fold` in `config.toml` in the plugin config directory
+(`$HERDR_PLUGIN_CONFIG_DIR`, see `herdr plugin config-dir
+ryutaroasada.nav-with-preview`):
+
+```toml
+fold = "workspace"   # only workspaces (default)
+# fold = "tab"       # workspaces and tabs, panes hidden
+# fold = "none"      # everything expanded
+```
+
 ## New-workspace directory picker
 
 `N` opens an fzf-style picker. Matching uses
@@ -58,9 +72,10 @@ Candidates, in order: the selected pane's cwd, cwds of all open panes,
 [zoxide](https://github.com/ajeetdsouza/zoxide) history (if installed),
 siblings of open cwds, and every directory under the scan roots (default `~`,
 depth 5), walked with the [ignore](https://crates.io/crates/ignore) crate
-(ripgrep's walker) — similar to `fd -t d`. Hidden and `.gitignore`d dirs,
-`node_modules`/`target`/`vendor`/`dist`/`build`, and `~/Library` and the other
-macOS media folders are skipped. Override in `config.toml` in the plugin config
+(ripgrep's walker) — similar to `fd -t d -H`. Hidden dirs are included, but
+`.git`, package/tool caches (`.cache`, `.npm`, `.bun`, `.gradle`, …),
+`.gitignore`d dirs, `node_modules`/`target`/`vendor`/`dist`/`build`, and
+`~/Library` and the other macOS media folders are skipped. Override in `config.toml` in the plugin config
 directory (`$HERDR_PLUGIN_CONFIG_DIR`):
 
 ```toml

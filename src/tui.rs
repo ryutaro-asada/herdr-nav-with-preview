@@ -126,6 +126,10 @@ fn status_color(status: Option<&str>) -> Color {
 /// Background of the selected row, like herdr's native cursor.
 const SELECTED_BG: Color = Color::Rgb(68, 80, 120);
 
+/// Background band behind workspace rows, so each workspace reads as a group
+/// header and the tabs/panes under it as its body.
+const WORKSPACE_BG: Color = Color::Rgb(36, 40, 56);
+
 /// Braille spinner frames for the `working` state.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -209,7 +213,18 @@ fn kind_color(kind: &RowKind) -> Color {
 /// `▎ <tree-glyph> <status-dot> <name> [agent]`. When selected, the whole row
 /// is filled with a solid highlight background across the full width.
 fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'static> {
-    let base = |s: Style| if selected { s.bg(SELECTED_BG) } else { s };
+    let is_workspace = matches!(row.kind, RowKind::Workspace { .. });
+    let row_bg = if selected {
+        Some(SELECTED_BG)
+    } else if is_workspace {
+        Some(WORKSPACE_BG)
+    } else {
+        None
+    };
+    let base = |s: Style| match row_bg {
+        Some(bg) => s.bg(bg),
+        None => s,
+    };
 
     let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -220,22 +235,22 @@ fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'stati
             Style::default().fg(Color::Cyan).bg(SELECTED_BG),
         ));
     } else {
-        spans.push(Span::raw(" "));
+        spans.push(Span::styled(" ", base(Style::default())));
     }
 
     // Indent + continuous tree lines for tabs/panes.
     //
     // Each workspace is its own small tree, so we don't draw a vertical line at
     // the workspace level (the first `ancestors_last` entry). For the remaining
-    // ancestor levels draw "│ " (ancestor still has siblings below) or "  "
-    // (ancestor was the last child), then the node's own branch "├─"/"└─".
+    // ancestor levels draw "│   " (ancestor still has siblings below) or
+    // "    " (ancestor was the last child), then the node's own branch
+    // "├── "/"└── ". Four columns per level keep panes visibly deeper than tabs.
     if row.depth > 0 {
         let mut tree_prefix = String::new();
         for &anc_last in row.ancestors_last.iter().skip(1) {
-            tree_prefix.push_str(if anc_last { "  " } else { "│ " });
+            tree_prefix.push_str(if anc_last { "    " } else { "│   " });
         }
-        tree_prefix.push_str(if row.is_last { "└─" } else { "├─" });
-        tree_prefix.push(' ');
+        tree_prefix.push_str(if row.is_last { "└── " } else { "├── " });
         spans.push(Span::styled(
             tree_prefix,
             base(Style::default().fg(Color::DarkGray)),
@@ -263,12 +278,13 @@ fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'stati
         base(Style::default().fg(kind_color)),
     ));
 
-    // Agent status glyph. Pane rows always show it; workspace/tab rows show
-    // herdr's aggregated status only when notable (working/blocked/done), so
-    // activity is visible even when the node is collapsed.
+    // Agent status glyph. Pane rows always show it; tab rows show herdr's
+    // aggregated status only when notable (working/blocked/done), so activity
+    // is visible even when the tab is collapsed. Workspace rows show per-status
+    // counts on the right instead.
     let status = row.agent_status.as_deref();
     let is_pane = matches!(row.kind, RowKind::Pane { .. });
-    if is_pane || is_notable_status(status) {
+    if is_pane || (!is_workspace && is_notable_status(status)) {
         let mut st = Style::default().fg(status_color(status));
         if is_notable_status(status) {
             st = st.add_modifier(Modifier::BOLD);
@@ -301,14 +317,40 @@ fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'stati
         .as_deref()
         .map(unicode_width::UnicodeWidthStr::width)
         .unwrap_or(0);
-    // Right-aligned status chip on pane rows (working/blocked/done).
-    let chip = if is_pane { status_chip(status) } else { None };
-    let chip_w = chip
-        .as_ref()
-        .map(|(t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()) + 1)
-        .unwrap_or(0);
+    // Right-aligned status: a chip on pane rows, per-status agent counts on
+    // workspace rows (so activity is visible while the workspace is folded).
+    let mut right: Vec<Span<'static>> = Vec::new();
+    if is_pane {
+        if let Some((text, style)) = status_chip(status) {
+            right.push(Span::styled(text, style));
+            right.push(Span::styled(" ", base(Style::default())));
+        }
+    } else if is_workspace {
+        let c = row.agent_counts;
+        for (n, s) in [
+            (c.working, "working"),
+            (c.blocked, "blocked"),
+            (c.done, "done"),
+            (c.idle, "idle"),
+        ] {
+            if n > 0 {
+                let mut st = Style::default().fg(status_color(Some(s)));
+                if is_notable_status(Some(s)) {
+                    st = st.add_modifier(Modifier::BOLD);
+                }
+                right.push(Span::styled(
+                    format!("{}{n} ", status_glyph(Some(s), tick)),
+                    base(st),
+                ));
+            }
+        }
+    }
+    let right_w: usize = right
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
     let avail = width.saturating_sub(used);
-    let name = truncate_display(&row.name, avail.saturating_sub(badge_w + chip_w).max(1));
+    let name = truncate_display(&row.name, avail.saturating_sub(badge_w + right_w).max(1));
     let name_w = unicode_width::UnicodeWidthStr::width(name.as_str());
     spans.push(Span::styled(name, base(name_style)));
     if let Some(badge) = agent_badge {
@@ -316,17 +358,14 @@ fn row_line(row: &Row, selected: bool, width: usize, tick: usize) -> Line<'stati
         spans.push(Span::styled(badge, badge_style));
     }
 
-    // Pad so the chip sits at the right edge and (when selected) the highlight
-    // fill spans the whole row.
+    // Pad so the right-side status sits at the right edge and the row
+    // background (selection or workspace band) spans the whole row.
     let drawn = used + name_w + badge_w;
-    let pad = width.saturating_sub(drawn + chip_w);
-    if pad > 0 && (selected || chip.is_some()) {
+    let pad = width.saturating_sub(drawn + right_w);
+    if pad > 0 && (row_bg.is_some() || !right.is_empty()) {
         spans.push(Span::styled(" ".repeat(pad), base(Style::default())));
     }
-    if let Some((text, style)) = chip {
-        spans.push(Span::styled(text, style));
-        spans.push(Span::styled(" ", base(Style::default())));
-    }
+    spans.extend(right);
 
     Line::from(spans)
 }
