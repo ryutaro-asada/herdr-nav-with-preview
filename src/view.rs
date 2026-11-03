@@ -84,6 +84,29 @@ pub struct Row {
     /// draws `│ ` when the ancestor still has siblings below, or `  ` when it
     /// was the last child.
     pub ancestors_last: Vec<bool>,
+    /// Agent panes per status under this node. Filled for workspace rows only.
+    pub agent_counts: AgentCounts,
+}
+
+/// Number of agent panes in each herdr status.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentCounts {
+    pub working: usize,
+    pub blocked: usize,
+    pub done: usize,
+    pub idle: usize,
+}
+
+impl AgentCounts {
+    fn add(&mut self, status: Option<&str>) {
+        match status {
+            Some("working") => self.working += 1,
+            Some("blocked") => self.blocked += 1,
+            Some("done") => self.done += 1,
+            Some("idle") => self.idle += 1,
+            _ => {}
+        }
+    }
 }
 
 impl Row {
@@ -141,11 +164,13 @@ impl Row {
 }
 
 /// A unique key for a collapsible node (workspace or tab).
+const WS_KEY_PREFIX: &str = "w:";
+const TAB_KEY_PREFIX: &str = "t:";
 fn ws_key(id: &str) -> String {
-    format!("w:{id}")
+    format!("{WS_KEY_PREFIX}{id}")
 }
 fn tab_key(id: &str) -> String {
-    format!("t:{id}")
+    format!("{TAB_KEY_PREFIX}{id}")
 }
 
 /// Compute the first visible row index for a window of `height` rows out of
@@ -265,10 +290,50 @@ fn tab_row_name(t: &TabNode) -> String {
     }
 }
 
+/// Which levels start collapsed when the navigator opens. Set with
+/// `fold = "workspace" | "tab" | "none"` in the plugin `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fold {
+    /// Workspaces collapsed: only workspace rows are shown.
+    Workspace,
+    /// Tabs collapsed: workspaces and tabs are shown, panes hidden.
+    Tab,
+    /// Everything expanded.
+    None,
+}
+
+impl Fold {
+    /// Parse the `fold` value from the plugin config TOML text. Unknown or
+    /// missing values return `None`.
+    pub fn parse(config_toml: &str) -> Option<Fold> {
+        let v = crate::dirs::toml_value(config_toml, "fold")?;
+        match v.split('#').next()?.trim().trim_matches('"').trim_matches('\'') {
+            "workspace" => Some(Fold::Workspace),
+            "tab" => Some(Fold::Tab),
+            "none" => Some(Fold::None),
+            _ => None,
+        }
+    }
+
+    /// The configured fold level, defaulting to `Workspace`.
+    pub fn from_config() -> Fold {
+        std::env::var("HERDR_PLUGIN_CONFIG_DIR")
+            .ok()
+            .and_then(|dir| {
+                std::fs::read_to_string(std::path::PathBuf::from(dir).join("config.toml")).ok()
+            })
+            .and_then(|text| Fold::parse(&text))
+            .unwrap_or(Fold::Workspace)
+    }
+}
+
 pub struct TreeView {
     tree: Tree,
-    /// Keys of nodes that are collapsed. Default (absent) == expanded.
+    /// Default collapse state for nodes the user hasn't toggled.
+    fold: Fold,
+    /// Nodes the user collapsed / expanded, overriding `fold`.
     collapsed: HashSet<String>,
+    expanded: HashSet<String>,
     selected: usize,
     /// Incremental search query. When non-empty, `rows()` shows only rows that
     /// match (plus their ancestors), with all nodes expanded.
@@ -279,7 +344,9 @@ impl TreeView {
     pub fn new(tree: Tree) -> Self {
         Self {
             tree,
+            fold: Fold::None,
             collapsed: HashSet::new(),
+            expanded: HashSet::new(),
             selected: 0,
             query: String::new(),
         }
@@ -399,8 +466,62 @@ impl TreeView {
         self.clamp_selection();
     }
 
+    /// Set which levels start collapsed. Call before `select_for_launch`, which
+    /// can only land on rows that are visible.
+    pub fn set_fold(&mut self, fold: Fold) {
+        self.fold = fold;
+        self.clamp_selection();
+    }
+
+    /// Expand the given workspace and all of its tabs, overriding `fold`.
+    pub fn reveal_workspace(&mut self, workspace_id: &str) {
+        let Some(w) = self
+            .tree
+            .workspaces
+            .iter()
+            .find(|w| w.workspace_id == workspace_id)
+        else {
+            return;
+        };
+        let keys: Vec<String> = std::iter::once(ws_key(&w.workspace_id))
+            .chain(w.tabs.iter().map(|t| tab_key(&t.tab_id)))
+            .collect();
+        for k in keys {
+            self.set_collapsed(k, false);
+        }
+    }
+
+    /// The focused workspace's id, if any.
+    pub fn focused_workspace_id(&self) -> Option<String> {
+        self.tree
+            .workspaces
+            .iter()
+            .find(|w| w.focused)
+            .map(|w| w.workspace_id.clone())
+    }
+
     fn is_collapsed(&self, key: &str) -> bool {
-        self.collapsed.contains(key)
+        if self.collapsed.contains(key) {
+            return true;
+        }
+        if self.expanded.contains(key) {
+            return false;
+        }
+        match self.fold {
+            Fold::Workspace => key.starts_with(WS_KEY_PREFIX),
+            Fold::Tab => key.starts_with(TAB_KEY_PREFIX),
+            Fold::None => false,
+        }
+    }
+
+    fn set_collapsed(&mut self, key: String, collapsed: bool) {
+        if collapsed {
+            self.expanded.remove(&key);
+            self.collapsed.insert(key);
+        } else {
+            self.collapsed.remove(&key);
+            self.expanded.insert(key);
+        }
     }
 
     /// Compute the currently visible rows. With no search query, honors
@@ -424,6 +545,10 @@ impl TreeView {
             let wkey = ws_key(&w.workspace_id);
             let w_collapsed = honor_collapse && self.is_collapsed(&wkey);
             let w_is_last = wi + 1 == ws_count;
+            let mut agent_counts = AgentCounts::default();
+            for p in w.tabs.iter().flat_map(|t| &t.panes) {
+                agent_counts.add(p.agent_status.as_deref());
+            }
             rows.push(Row {
                 depth: 0,
                 name: workspace_row_name(w),
@@ -437,6 +562,7 @@ impl TreeView {
                 focused: w.focused,
                 is_last: w_is_last,
                 ancestors_last: vec![],
+                agent_counts,
             });
             if w_collapsed {
                 continue;
@@ -460,6 +586,7 @@ impl TreeView {
                     focused: false,
                     is_last: t_is_last,
                     ancestors_last: vec![w_is_last],
+                    agent_counts: AgentCounts::default(),
                 });
                 if t_collapsed {
                     continue;
@@ -481,6 +608,7 @@ impl TreeView {
                         focused: false,
                         is_last: pi + 1 == pane_count,
                         ancestors_last: vec![w_is_last, t_is_last],
+                        agent_counts: AgentCounts::default(),
                     });
                 }
             }
@@ -515,23 +643,22 @@ impl TreeView {
     /// Collapse the selected node (left arrow). On a pane, no-op.
     pub fn collapse(&mut self) {
         if let Some(key) = self.selected_key() {
-            self.collapsed.insert(key);
+            self.set_collapsed(key, true);
         }
     }
 
     /// Expand the selected node (right arrow). On a pane, no-op.
     pub fn expand(&mut self) {
         if let Some(key) = self.selected_key() {
-            self.collapsed.remove(&key);
+            self.set_collapsed(key, false);
         }
     }
 
     /// Toggle expand/collapse of the selected node.
     pub fn toggle(&mut self) {
         if let Some(key) = self.selected_key() {
-            if !self.collapsed.remove(&key) {
-                self.collapsed.insert(key);
-            }
+            let now = self.is_collapsed(&key);
+            self.set_collapsed(key, !now);
         }
     }
 }
@@ -659,6 +786,50 @@ mod tests {
             }
         );
         assert!(!rows[1].expanded);
+    }
+
+    #[test]
+    fn fold_workspace_shows_only_workspaces_until_expanded() {
+        let mut view = TreeView::new(sample_tree());
+        view.set_fold(Fold::Workspace);
+        assert_eq!(view.rows().len(), 1);
+        assert!(!view.rows()[0].expanded);
+        view.expand();
+        // Tabs are expanded under an expanded workspace.
+        assert_eq!(view.rows().len(), 5);
+        view.toggle();
+        assert_eq!(view.rows().len(), 1);
+    }
+
+    #[test]
+    fn fold_tab_hides_panes_only() {
+        let mut view = TreeView::new(sample_tree());
+        view.set_fold(Fold::Tab);
+        // workspace + 2 collapsed tabs.
+        assert_eq!(view.rows().len(), 3);
+        view.move_down();
+        view.toggle();
+        assert_eq!(view.rows().len(), 4);
+    }
+
+    #[test]
+    fn reveal_workspace_expands_it_and_its_tabs() {
+        let mut view = TreeView::new(sample_tree());
+        view.set_fold(Fold::Tab);
+        view.reveal_workspace("w1");
+        assert_eq!(view.rows().len(), 5);
+        view.reveal_workspace("missing");
+        assert_eq!(view.rows().len(), 5);
+        assert_eq!(view.focused_workspace_id().as_deref(), Some("w1"));
+    }
+
+    #[test]
+    fn parses_fold_config() {
+        assert_eq!(Fold::parse("fold = \"tab\"\n"), Some(Fold::Tab));
+        assert_eq!(Fold::parse("fold='none' # all open"), Some(Fold::None));
+        assert_eq!(Fold::parse("fold = \"workspace\""), Some(Fold::Workspace));
+        assert_eq!(Fold::parse("fold = \"x\""), None);
+        assert_eq!(Fold::parse("depth = 3"), None);
     }
 
     #[test]
